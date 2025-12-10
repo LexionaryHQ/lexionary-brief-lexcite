@@ -2,6 +2,6 @@ fastapi
 uvicorn[standard]
 requests
 beautifulsoup4
-pdfminer.six
 pydantic
 openai
+pdfminer.six
