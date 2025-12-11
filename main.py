@@ -15,6 +15,8 @@ from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from aglc_engine import format_citation, SourceType
+from pydantic import ValidationError
 
 # ---------------------------------------------------------------------------
 # Helper to pull out neutral citation from a longer string
@@ -165,6 +167,10 @@ class LexciteResponse(BaseModel):
     entries: List[LexciteEntry]
     errors: List[str] = Field(default_factory=list)
 
+class CitationRequest(BaseModel):
+    source_type: SourceType | str
+    data: dict
+    mode: str = "footnote"
 
 # ---------------- AustLII constants ----------------
 AUSTLII_BASE = "https://www.austlii.edu.au"
@@ -728,6 +734,40 @@ def brief(req: BriefRequest, request: Request):
     }
     return BriefResponse(success=True, brief=brief_text, meta=meta)
 
+@app.post("/cite")
+async def cite(req: CitationRequest):
+    try:
+        result = format_citation(
+            source_type=req.source_type,
+            data=req.data,
+            mode=req.mode,
+        )
+        return {
+            "success": True,
+            "source_type": result.source_type.value,
+            "mode": result.mode,
+            "text": result.text,
+            "html": result.html,
+        }
+    except ValidationError as ve:
+        # Input did not match the model for that source type
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "success": False,
+                "error": "validation_error",
+                "messages": ve.errors(),
+            },
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "success": False,
+                "error": "server_error",
+                "message": str(e),
+            },
+        )
 
 # -------------------------------------------------------------------------
 # LEXCITE ENGINE (AGLC DETECTION + METADATA + WEBSITE SUPPORT)
