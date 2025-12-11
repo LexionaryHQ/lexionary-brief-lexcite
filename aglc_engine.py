@@ -1,10 +1,10 @@
-# aglc_engine.py
+from __future__ import annotations
 
-from enum import Enum
-from typing import List, Optional, Dict, Any, Union
 from dataclasses import dataclass
+from enum import Enum
+from typing import List, Optional, Union
 
-from pydantic import BaseModel, validator
+from pydantic import BaseModel, ValidationError, field_validator
 
 
 class SourceType(str, Enum):
@@ -21,23 +21,12 @@ class SourceType(str, Enum):
 @dataclass
 class CitationResult:
     source_type: SourceType
-    mode: str          # "footnote" or "bibliography"
-    text: str          # plain text (no italics)
-    html: str          # with <i> for italics
+    mode: str  # "footnote" or "bibliography"
+    text: str
+    html: str
 
 
-def join_authors(authors: List[str]) -> str:
-    if not authors:
-        return ""
-    if len(authors) == 1:
-        return authors[0]
-    if len(authors) == 2:
-        return f"{authors[0]} and {authors[1]}"
-    return f"{authors[0]} et al"
-
-
-def italic_html(text: str) -> str:
-    return f"<i>{text}</i>" if text else ""
+# ---------- CASE ----------
 
 
 class CaseCitation(BaseModel):
@@ -47,34 +36,104 @@ class CaseCitation(BaseModel):
     volume: Optional[str] = None
     reporter: Optional[str] = None
     first_page: Optional[str] = None
-
     court: Optional[str] = None
     decision_number: Optional[str] = None
     neutral_citation_first: bool = True
     unreported: bool = False
+    pinpoint_type: Optional[str] = None  # "page" | "paragraph" | None
+    pinpoint: Optional[str] = None
 
-    pinpoint_type: Optional[str] = None   # "page" or "paragraph"
-    pinpoint: Optional[str] = None        # "7" or "45"
-
-    @validator("case_name")
-    def strip_case_name(cls, v: str) -> str:
-        return v.strip()
-
-    @validator("pinpoint_type")
-    def validate_pinpoint_type(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
-            return v
+    @field_validator("pinpoint_type")
+    @classmethod
+    def validate_pinpoint_type(cls, v):
+        if v is None or v == "":
+            return None
         if v not in {"page", "paragraph"}:
-            raise ValueError("pinpoint_type must be 'page' or 'paragraph'")
+            raise ValueError("pinpoint_type must be 'page', 'paragraph', or null")
         return v
 
-    def year_with_brackets(self) -> str:
-        if self.reporter_series_by_year or self.unreported:
-            return f"[{self.year}]"
-        return f"({self.year})"
 
-    def neutral_year(self) -> str:
-        return f"[{self.year}]"
+def format_case(data: dict, mode: str) -> CitationResult:
+    c = CaseCitation(**data)
+
+    # Italicised case name
+    italic_name = f"<i>{c.case_name}</i>"
+
+    # Neutral citation if we have court + decision
+    neutral_part = None
+    if c.court and c.decision_number:
+        neutral_part = f"[{c.year}] {c.court} {c.decision_number}"
+
+    # Reported citation if we have volume + reporter + first page
+    report_part = None
+    if c.volume and c.reporter and c.first_page:
+        if c.reporter_series_by_year:
+            # Year-based series: [1998] 194 CLR 1
+            report_part = f"[{c.year}] {c.volume} {c.reporter} {c.first_page}"
+        else:
+            # Standard: (1992) 175 CLR 1
+            report_part = f"({c.year}) {c.volume} {c.reporter} {c.first_page}"
+
+    segments_text: List[str] = [c.case_name]
+    segments_html: List[str] = [italic_name]
+
+    if c.unreported:
+        # Unreported: neutral only
+        if neutral_part:
+            segments_text.append(neutral_part)
+            segments_html.append(neutral_part)
+        else:
+            # Fallback: at least put year
+            segments_text.append(f"[{c.year}]")
+            segments_html.append(f"[{c.year}]")
+    else:
+        # Reported / mixed scenarios
+        if neutral_part and report_part:
+            # Both neutral and report
+            if c.neutral_citation_first:
+                segments_text.append(neutral_part)
+                segments_text.append(report_part)
+                segments_html.append(neutral_part)
+                segments_html.append(report_part)
+            else:
+                segments_text.append(report_part)
+                segments_text.append(neutral_part)
+                segments_html.append(report_part)
+                segments_html.append(neutral_part)
+        elif report_part:
+            # Report only
+            segments_text.append(report_part)
+            segments_html.append(report_part)
+        elif neutral_part:
+            # Neutral only
+            segments_text.append(neutral_part)
+            segments_html.append(neutral_part)
+        else:
+            # Very minimal: name + year
+            segments_text.append(f"({c.year})")
+            segments_html.append(f"({c.year})")
+
+    # Pinpoint logic
+    pin_str_text = ""
+    if c.pinpoint and c.pinpoint.strip():
+        if c.pinpoint_type == "paragraph":
+            # AGLC: [150]
+            pin_str_text = f"[{c.pinpoint.strip()}]"
+        else:
+            # Page or generic: 42
+            pin_str_text = c.pinpoint.strip()
+
+    text = " ".join(seg for seg in segments_text if seg)
+    html = " ".join(seg for seg in segments_html if seg)
+
+    if pin_str_text:
+        text = f"{text}, {pin_str_text}"
+        html = f"{html}, {pin_str_text}"
+
+    return CitationResult(source_type=SourceType.CASE, mode=mode, text=text, html=html)
+
+
+# ---------- LEGISLATION ----------
 
 
 class LegislationCitation(BaseModel):
@@ -82,12 +141,38 @@ class LegislationCitation(BaseModel):
     year: str
     jurisdiction: str
     is_bill: bool = False
-    pinpoint_unit: Optional[str] = None   # s, ss, pt, ch, div, sch
+    pinpoint_unit: Optional[str] = None  # s, ss, pt, sch etc
     pinpoint_number: Optional[str] = None
 
-    @validator("title", "jurisdiction")
-    def strip_fields(cls, v: str) -> str:
-        return v.strip()
+
+def format_legislation(data: dict, mode: str) -> CitationResult:
+    l = LegislationCitation(**data)
+
+    full_title = f"{l.title} {l.year}"
+    italic_title = f"<i>{l.title} {l.year}</i>"
+
+    base_text = f"{full_title} ({l.jurisdiction})"
+    base_html = f"{italic_title} ({l.jurisdiction})"
+
+    if l.is_bill:
+        full_title_bill = f"{l.title} Bill {l.year}"
+        base_text = f"{full_title_bill} ({l.jurisdiction})"
+        base_html = f"<i>{full_title_bill}</i> ({l.jurisdiction})"
+
+    pin = ""
+    if l.pinpoint_unit and l.pinpoint_number:
+        unit = l.pinpoint_unit.strip()
+        num = l.pinpoint_number.strip()
+        pin = f"{unit} {num}"
+
+    if pin:
+        base_text = f"{base_text} {pin}"
+        base_html = f"{base_html} {pin}"
+
+    return CitationResult(source_type=SourceType.LEGISLATION, mode=mode, text=base_text, html=base_html)
+
+
+# ---------- JOURNAL ARTICLE ----------
 
 
 class JournalArticleCitation(BaseModel):
@@ -104,11 +189,70 @@ class JournalArticleCitation(BaseModel):
     url: Optional[str] = None
     access_date: Optional[str] = None
 
-    @validator("authors", "article_title", "journal_title")
-    def strip_strings(cls, v):
-        if isinstance(v, list):
-            return [s.strip() for s in v]
-        return v.strip()
+
+def format_authors(authors: List[str]) -> str:
+    if not authors:
+        return ""
+    if len(authors) == 1:
+        return authors[0]
+    if len(authors) == 2:
+        return f"{authors[0]} and {authors[1]}"
+    return f"{authors[0]} et al"
+
+
+def format_journal_article(data: dict, mode: str) -> CitationResult:
+    j = JournalArticleCitation(**data)
+    author_str = format_authors(j.authors)
+
+    year_part = f"[{j.year}]" if j.year_in_square_brackets else f"({j.year})"
+
+    vol_issue = ""
+    if j.volume and j.issue:
+        vol_issue = f"{j.volume}({j.issue})"
+    elif j.volume:
+        vol_issue = j.volume
+    elif j.issue:
+        vol_issue = j.issue
+
+    parts_text: List[str] = []
+    parts_html: List[str] = []
+
+    if author_str:
+        parts_text.append(f"{author_str},")
+        parts_html.append(f"{author_str},")
+    parts_text.append(f"'{j.article_title}'")
+    parts_html.append(f"'{j.article_title}'")
+
+    core = year_part
+    if vol_issue:
+        core = f"{year_part} {vol_issue}"
+
+    parts_text.append(core)
+    parts_text.append(j.journal_title)
+    parts_html.append(core)
+    parts_html.append(f"<i>{j.journal_title}</i>")
+
+    parts_text.append(j.starting_page)
+    parts_html.append(j.starting_page)
+
+    if j.pinpoint:
+        parts_text[-1] = f"{parts_text[-1]}, {j.pinpoint}"
+        parts_html[-1] = f"{parts_html[-1]}, {j.pinpoint}"
+
+    text = " ".join(p for p in parts_text if p)
+    html = " ".join(p for p in parts_html if p)
+
+    if j.is_online and j.url:
+        tail = f"<{j.url}>"
+        if j.access_date:
+            tail = f"{tail} accessed {j.access_date}"
+        text = f"{text} {tail}"
+        html = f"{html} {tail}"
+
+    return CitationResult(source_type=SourceType.JOURNAL_ARTICLE, mode=mode, text=text, html=html)
+
+
+# ---------- BOOK ----------
 
 
 class BookCitation(BaseModel):
@@ -119,11 +263,28 @@ class BookCitation(BaseModel):
     edition: Optional[str] = None
     pinpoint: Optional[str] = None
 
-    @validator("authors", "title", "publisher")
-    def strip_strings(cls, v):
-        if isinstance(v, list):
-            return [s.strip() for s in v]
-        return v.strip()
+
+def format_book(data: dict, mode: str) -> CitationResult:
+    b = BookCitation(**data)
+    author_str = format_authors(b.authors)
+
+    pub_parts = [b.publisher]
+    if b.edition:
+        pub_parts.append(b.edition)
+    pub_parts.append(b.year)
+    pub_segment = ", ".join(pub_parts)
+
+    text = f"{author_str}, {b.title} ({pub_segment})"
+    html = f"{author_str}, <i>{b.title}</i> ({pub_segment})"
+
+    if b.pinpoint:
+        text = f"{text} {b.pinpoint}"
+        html = f"{html} {b.pinpoint}"
+
+    return CitationResult(source_type=SourceType.BOOK, mode=mode, text=text, html=html)
+
+
+# ---------- BOOK CHAPTER ----------
 
 
 class BookChapterCitation(BaseModel):
@@ -137,11 +298,49 @@ class BookChapterCitation(BaseModel):
     starting_page: Optional[str] = None
     pinpoint: Optional[str] = None
 
-    @validator("chapter_authors", "editors", "chapter_title", "book_title", "publisher")
-    def strip_strings(cls, v):
-        if isinstance(v, list):
-            return [s.strip() for s in v]
-        return v.strip()
+
+def format_book_chapter(data: dict, mode: str) -> CitationResult:
+    c = BookChapterCitation(**data)
+    chapter_authors = format_authors(c.chapter_authors)
+    editors = format_authors(c.editors)
+
+    text_parts: List[str] = []
+    html_parts: List[str] = []
+
+    if chapter_authors:
+        text_parts.append(f"{chapter_authors},")
+        html_parts.append(f"{chapter_authors},")
+    text_parts.append(f"'{c.chapter_title}',")
+    html_parts.append(f"'{c.chapter_title}',")
+
+    if editors:
+        ed_suffix = "ed" if len(c.editors) == 1 else "eds"
+        text_parts.append(f"in {editors} ({ed_suffix}),")
+        html_parts.append(f"in {editors} ({ed_suffix}),")
+
+    pub_parts = [c.publisher]
+    if c.edition:
+        pub_parts.append(c.edition)
+    pub_parts.append(c.year)
+    pub_segment = ", ".join(pub_parts)
+
+    text_parts.append(f"{c.book_title} ({pub_segment})")
+    html_parts.append(f"<i>{c.book_title}</i> ({pub_segment})")
+
+    if c.starting_page:
+        text_parts[-1] = f"{text_parts[-1]} {c.starting_page}"
+        html_parts[-1] = f"{html_parts[-1]} {c.starting_page}"
+
+    if c.pinpoint:
+        text_parts[-1] = f"{text_parts[-1]}, {c.pinpoint}"
+        html_parts[-1] = f"{html_parts[-1]}, {c.pinpoint}"
+
+    text = " ".join(text_parts)
+    html = " ".join(html_parts)
+    return CitationResult(source_type=SourceType.BOOK_CHAPTER, mode=mode, text=text, html=html)
+
+
+# ---------- MEDIA ARTICLE ----------
 
 
 class MediaArticleCitation(BaseModel):
@@ -156,9 +355,53 @@ class MediaArticleCitation(BaseModel):
     url: Optional[str] = None
     access_date: Optional[str] = None
 
-    @validator("article_title", "newspaper_title")
-    def strip_strings(cls, v: str) -> str:
-        return v.strip()
+
+def format_media_article(data: dict, mode: str) -> CitationResult:
+    m = MediaArticleCitation(**data)
+
+    author_str = ""
+    if m.authors:
+        author_str = format_authors(m.authors)
+    elif m.org_as_author:
+        author_str = m.org_as_author
+
+    parts_text: List[str] = []
+    parts_html: List[str] = []
+
+    if author_str:
+        parts_text.append(f"{author_str},")
+        parts_html.append(f"{author_str},")
+    parts_text.append(f"'{m.article_title}',")
+    parts_html.append(f"'{m.article_title}',")
+
+    if m.city:
+        loc_text = f"{m.newspaper_title} ({m.city}, {m.date})"
+        loc_html = f"<i>{m.newspaper_title}</i> ({m.city}, {m.date})"
+    else:
+        loc_text = f"{m.newspaper_title} ({m.date})"
+        loc_html = f"<i>{m.newspaper_title}</i> ({m.date})"
+
+    parts_text.append(loc_text)
+    parts_html.append(loc_html)
+
+    if m.page:
+        parts_text[-1] = f"{parts_text[-1]} {m.page}"
+        parts_html[-1] = f"{parts_html[-1]} {m.page}"
+
+    text = " ".join(parts_text)
+    html = " ".join(parts_html)
+
+    if m.is_online and m.url:
+        tail = f"<{m.url}>"
+        if m.access_date:
+            tail = f"{tail} accessed {m.access_date}"
+        text = f"{text} {tail}"
+        html = f"{html} {tail}"
+
+    return CitationResult(source_type=SourceType.MEDIA_ARTICLE, mode=mode, text=text, html=html)
+
+
+# ---------- REPORT ----------
 
 
 class ReportCitation(BaseModel):
@@ -173,348 +416,12 @@ class ReportCitation(BaseModel):
     url: Optional[str] = None
     access_date: Optional[str] = None
 
-    @validator("author_or_org", "title")
-    def strip_strings(cls, v: str) -> str:
-        return v.strip()
 
+def format_report(data: dict, mode: str) -> CitationResult:
+    r = ReportCitation(**data)
 
-class WebsiteCitation(BaseModel):
-    author_or_org: Optional[str] = None
-    page_title: str
-    site_name: str
-    date: Optional[str] = None
-    url: str
-    access_date: str
+    parts_text: List[str] = [f"{r.author_or_org},"]
 
-    @validator("page_title", "site_name", "url", "access_date")
-    def strip_strings(cls, v: str) -> str:
-        return v.strip()
 
 
-def _format_case(case: CaseCitation, mode: str) -> CitationResult:
-    text_case = case.case_name
-    html_case = italic_html(case.case_name)
-
-    pinpoint_str = ""
-    if case.pinpoint:
-        if case.pinpoint_type == "paragraph":
-            pinpoint_str = f" [para {case.pinpoint}]"
-        elif case.pinpoint_type == "page":
-            pinpoint_str = f" {case.pinpoint}"
-
-    parts_text: List[str] = [text_case]
-    parts_html: List[str] = [html_case]
-
-    neutral_str_text = None
-    neutral_str_html = None
-    report_str_text = None
-    report_str_html = None
-
-    if case.court and case.decision_number:
-        neutral_year = case.neutral_year()
-        neutral_str_text = f"{neutral_year} {case.court} {case.decision_number}"
-        neutral_str_html = neutral_str_text
-
-    if case.reporter and case.first_page:
-        year_part = case.year_with_brackets()
-        vol = f" {case.volume}" if case.volume else ""
-        report_str_text = f"{year_part}{vol} {case.reporter} {case.first_page}"
-        report_str_html = report_str_text
-
-    if case.unreported and neutral_str_text:
-        parts_text.append(neutral_str_text)
-        parts_html.append(neutral_str_html)
-    elif neutral_str_text and report_str_text:
-        if case.neutral_citation_first:
-            parts_text.append(neutral_str_text)
-            parts_text.append(report_str_text)
-            parts_html.append(neutral_str_html)
-            parts_html.append(report_str_html)
-        else:
-            parts_text.append(report_str_text)
-            parts_text.append(neutral_str_text)
-            parts_html.append(report_str_html)
-            parts_html.append(neutral_str_html)
-    elif report_str_text:
-        parts_text.append(report_str_text)
-        parts_html.append(report_str_html)
-
-    base_text = " ".join(parts_text).strip()
-    base_html = " ".join(parts_html).strip()
-
-    if pinpoint_str:
-        base_text = f"{base_text},{pinpoint_str}"
-        base_html = f"{base_html},{pinpoint_str}"
-
-    return CitationResult(
-        source_type=SourceType.CASE,
-        mode=mode,
-        text=base_text,
-        html=base_html,
-    )
-
-
-def _format_legislation(leg: LegislationCitation, mode: str) -> CitationResult:
-    title_year = f"{leg.title} {leg.year}"
-    if leg.is_bill:
-        text_main = title_year
-        html_main = title_year
-    else:
-        text_main = title_year
-        html_main = italic_html(title_year)
-
-    main_text = f"{text_main} ({leg.jurisdiction})"
-    main_html = f"{html_main} ({leg.jurisdiction})"
-
-    if leg.pinpoint_unit and leg.pinpoint_number:
-        pin = f"{leg.pinpoint_unit} {leg.pinpoint_number}"
-        main_text = f"{main_text} {pin}"
-        main_html = f"{main_html} {pin}"
-
-    return CitationResult(
-        source_type=SourceType.LEGISLATION,
-        mode=mode,
-        text=main_text,
-        html=main_html,
-    )
-
-
-def _format_journal_article(art: JournalArticleCitation, mode: str) -> CitationResult:
-    authors_str = join_authors(art.authors)
-    year_brackets = f"[{art.year}]" if art.year_in_square_brackets else f"({art.year})"
-    vol_issue = ""
-    if art.volume:
-        vol_issue = art.volume
-        if art.issue:
-            vol_issue += f"({art.issue})"
-
-    base_text = f"{authors_str}, '{art.article_title}', {year_brackets} {vol_issue} {art.journal_title} {art.starting_page}"
-    base_html = f"{authors_str}, '{art.article_title}', {year_brackets} {vol_issue} {italic_html(art.journal_title)} {art.starting_page}"
-
-    if art.pinpoint:
-        base_text += f", {art.pinpoint}"
-        base_html += f", {art.pinpoint}"
-
-    if art.is_online and art.url and art.access_date:
-        base_text += f", {art.url}, {art.access_date}"
-        base_html += f", {art.url}, {art.access_date}"
-
-    return CitationResult(
-        source_type=SourceType.JOURNAL_ARTICLE,
-        mode=mode,
-        text=base_text.strip(),
-        html=base_html.strip(),
-    )
-
-
-def _format_book(book: BookCitation, mode: str) -> CitationResult:
-    authors_str = join_authors(book.authors)
-
-    if book.edition:
-        pub_block = f"{book.publisher}, {book.edition}, {book.year}"
-    else:
-        pub_block = f"{book.publisher}, {book.year}"
-
-    base_text = f"{authors_str}, {book.title} ({pub_block})"
-    base_html = f"{authors_str}, {italic_html(book.title)} ({pub_block})"
-
-    if book.pinpoint:
-        base_text += f" {book.pinpoint}"
-        base_html += f" {book.pinpoint}"
-
-    return CitationResult(
-        source_type=SourceType.BOOK,
-        mode=mode,
-        text=base_text.strip(),
-        html=base_html.strip(),
-    )
-
-
-def _format_book_chapter(ch: BookChapterCitation, mode: str) -> CitationResult:
-    chapter_authors_str = join_authors(ch.chapter_authors)
-    editors_str = join_authors(ch.editors)
-    ed_label = "ed" if len(ch.editors) == 1 else "eds"
-
-    if ch.edition:
-        pub_block = f"{ch.publisher}, {ch.edition}, {ch.year}"
-    else:
-        pub_block = f"{ch.publisher}, {ch.year}"
-
-    base_text = (
-        f"{chapter_authors_str}, '{ch.chapter_title}', in "
-        f"{editors_str} ({ed_label}), {ch.book_title} ({pub_block})"
-    )
-    base_html = (
-        f"{chapter_authors_str}, '{ch.chapter_title}', in "
-        f"{editors_str} ({ed_label}), {italic_html(ch.book_title)} ({pub_block})"
-    )
-
-    if ch.starting_page:
-        base_text += f" {ch.starting_page}"
-        base_html += f" {ch.starting_page}"
-
-    if ch.pinpoint:
-        base_text += f", {ch.pinpoint}"
-        base_html += f", {ch.pinpoint}"
-
-    return CitationResult(
-        source_type=SourceType.BOOK_CHAPTER,
-        mode=mode,
-        text=base_text.strip(),
-        html=base_html.strip(),
-    )
-
-
-def _format_media_article(m: MediaArticleCitation, mode: str) -> CitationResult:
-    if m.authors:
-        author_str = join_authors(m.authors)
-    elif m.org_as_author:
-        author_str = m.org_as_author
-    else:
-        author_str = ""
-
-    parts_text = []
-    parts_html = []
-
-    if author_str:
-        parts_text.append(author_str)
-        parts_html.append(author_str)
-
-    parts_text.append(f"'{m.article_title}'")
-    parts_html.append(f"'{m.article_title}'")
-
-    loc = m.newspaper_title
-    if m.city:
-        loc += f" ({m.city})"
-
-    loc_with_date = f"{loc}, {m.date}"
-
-    parts_text.append(loc_with_date)
-    parts_html.append(italic_html(m.newspaper_title) + (f" ({m.city})" if m.city else "") + f", {m.date}")
-
-    if m.page:
-        parts_text.append(m.page)
-        parts_html.append(m.page)
-
-    base_text = ", ".join(parts_text)
-    base_html = ", ".join(parts_html)
-
-    if m.is_online and m.url and m.access_date:
-        base_text += f", {m.url}, {m.access_date}"
-        base_html += f", {m.url}, {m.access_date}"
-
-    return CitationResult(
-        source_type=SourceType.MEDIA_ARTICLE,
-        mode=mode,
-        text=base_text.strip(),
-        html=base_html.strip(),
-    )
-
-
-def _format_report(r: ReportCitation, mode: str) -> CitationResult:
-    parts_text = [r.author_or_org, r.title]
-    parts_html = [r.author_or_org, italic_html(r.title)]
-
-    if r.report_number_or_series:
-        parts_text.append(r.report_number_or_series)
-        parts_html.append(r.report_number_or_series)
-
-    pub_bits = []
-    if r.publisher:
-        pub_bits.append(r.publisher)
-    if r.place:
-        pub_bits.append(r.place)
-    if r.date:
-        pub_bits.append(r.date)
-
-    if pub_bits:
-        pub_block = ", ".join(pub_bits)
-        parts_text.append(f"({pub_block})")
-        parts_html.append(f"({pub_block})")
-
-    if r.pinpoint:
-        parts_text.append(r.pinpoint)
-        parts_html.append(r.pinpoint)
-
-    base_text = ", ".join(parts_text)
-    base_html = ", ".join(parts_html)
-
-    if r.is_online and r.url and r.access_date:
-        base_text += f", {r.url}, {r.access_date}"
-        base_html += f", {r.url}, {r.access_date}"
-
-    return CitationResult(
-        source_type=SourceType.REPORT,
-        mode=mode,
-        text=base_text.strip(),
-        html=base_html.strip(),
-    )
-
-
-def _format_website(w: WebsiteCitation, mode: str) -> CitationResult:
-    parts_text = []
-    parts_html = []
-
-    if w.author_or_org:
-        parts_text.append(w.author_or_org)
-        parts_html.append(w.author_or_org)
-
-    parts_text.append(f"'{w.page_title}'")
-    parts_html.append(f"'{w.page_title}'")
-
-    site_block = w.site_name
-    parts_text.append(site_block)
-    parts_html.append(italic_html(w.site_name))
-
-    if w.date:
-        parts_text.append(w.date)
-        parts_html.append(w.date)
-
-    base_text = ", ".join(parts_text) + f", {w.url}, {w.access_date}"
-    base_html = ", ".join(parts_html) + f", {w.url}, {w.access_date}"
-
-    return CitationResult(
-        source_type=SourceType.WEBSITE,
-        mode=mode,
-        text=base_text.strip(),
-        html=base_html.strip(),
-    )
-
-
-def format_citation(
-    source_type: Union[SourceType, str],
-    data: Dict[str, Any],
-    mode: str = "footnote",
-) -> CitationResult:
-    if isinstance(source_type, str):
-        source_type = SourceType(source_type)
-
-    if mode not in {"footnote", "bibliography"}:
-        raise ValueError("mode must be 'footnote' or 'bibliography'")
-
-    if source_type == SourceType.CASE:
-        model = CaseCitation(**data)
-        return _format_case(model, mode)
-    if source_type == SourceType.LEGISLATION:
-        model = LegislationCitation(**data)
-        return _format_legislation(model, mode)
-    if source_type == SourceType.JOURNAL_ARTICLE:
-        model = JournalArticleCitation(**data)
-        return _format_journal_article(model, mode)
-    if source_type == SourceType.BOOK:
-        model = BookCitation(**data)
-        return _format_book(model, mode)
-    if source_type == SourceType.BOOK_CHAPTER:
-        model = BookChapterCitation(**data)
-        return _format_book_chapter(model, mode)
-    if source_type == SourceType.MEDIA_ARTICLE:
-        model = MediaArticleCitation(**data)
-        return _format_media_article(model, mode)
-    if source_type == SourceType.REPORT:
-        model = ReportCitation(**data)
-        return _format_report(model, mode)
-    if source_type == SourceType.WEBSITE:
-        model = WebsiteCitation(**data)
-        return _format_website(model, mode)
-
-    raise ValueError(f"Unsupported source_type: {source_type}")
+::contentReference[oaicite:0]{index=0}
