@@ -1,11 +1,8 @@
 # main.py - Lexionary v3 Brief API + Lexcite AGLC Engine
 # Version: 1.7.0
-# - Keeps existing /brief IRAC endpoint.
-# - /cite uses AGLC engine and returns plain + html.
-# - /lexcite/format now returns formatted_html per entry so paste mode can render italics.
 # Run: uvicorn main:app --host 0.0.0.0 --port 8000
 
-import os, re, time, logging, urllib.parse, random, json
+import os, re, time, logging, urllib.parse, random
 from datetime import datetime
 from typing import List, Optional, Dict, Any, Tuple
 
@@ -15,8 +12,7 @@ from pydantic import BaseModel, Field, ValidationError
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from aglc_engine import format_citation, SourceType
-from pydantic import ValidationError as PydValidationError
+from aglc_engine import format_citation, format_freeform_line, SourceType
 
 # ---------------------------------------------------------------------------
 # Helper to pull out neutral citation from a longer string
@@ -28,10 +24,7 @@ def extract_neutral_citation(user_input: str) -> str | None:
     text = " ".join(user_input.split())
     pattern = r"\[\d{4}\]\s+\S+\s+\d+"
     match = re.search(pattern, text)
-    if match:
-        return match.group(0).strip()
-    return None
-
+    return match.group(0).strip() if match else None
 
 # ---- Optional PDF extraction support
 HAS_PDFMINER = False
@@ -49,10 +42,9 @@ except Exception:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("lexionary")
 
-# ---------------- OpenAI client ----------------
+# ---------------- OpenAI client (brief only) ----------------
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-
 
 class _OpenAIShim:
     def __init__(self):
@@ -103,7 +95,6 @@ class _OpenAIShim:
         else:
             raise RuntimeError("OpenAI not configured. Set OPENAI_API_KEY or install SDK.")
 
-
 _openai = _OpenAIShim()
 
 # ---------------- FastAPI + CORS ----------------
@@ -126,40 +117,34 @@ class BriefRequest(BaseModel):
     jurisdiction: str = Field(default="AU")
     tone: str = Field(default="neutral")
 
-
 class BriefResponse(BaseModel):
     success: bool
     brief: str
     meta: Dict[str, Any] = Field(default_factory=dict)
 
-
 # Lexcite models
 class LexciteRequest(BaseModel):
     input_text: str = Field(..., description="One or more citations separated by newlines.")
-
 
 class LexciteEntry(BaseModel):
     id: str
     raw: str
     source_type: str
     formatted: str
-    formatted_html: str = ""
+    formatted_html: str
     validated: bool
     validation_errors: List[str]
     meta: Dict[str, Any] = Field(default_factory=dict)
-
 
 class LexciteResponse(BaseModel):
     api_version: str
     entries: List[LexciteEntry]
     errors: List[str] = Field(default_factory=list)
 
-
 class CitationRequest(BaseModel):
     source_type: SourceType | str
     data: dict
     mode: str = "footnote"
-
 
 # ---------------- AustLII constants ----------------
 AUSTLII_BASE = "https://www.austlii.edu.au"
@@ -171,7 +156,7 @@ AUSTLII_MIRRORS = [
     "https://www7.austlii.edu.au",
 ]
 AUSTLII_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; Lexionary/1.4.2; +https://lexionary.com.au)",
+    "User-Agent": "Mozilla/5.0 (compatible; Lexionary/1.7.0; +https://lexionary.com.au)",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-AU,en;q=0.9",
     "Connection": "keep-alive",
@@ -188,7 +173,6 @@ def rewrite_url_to_mirror(url: str, mirror: str) -> str:
         (mpar.scheme, mpar.netloc, parsed.path, parsed.params, parsed.query, parsed.fragment)
     )
 
-# ---------------- Basic rate limit ----------------
 class RateLimiter:
     def __init__(self, min_interval_sec: float = 1.2):
         self.min_interval = min_interval_sec
@@ -211,9 +195,11 @@ def http_get(url: str, timeout: int = 22, headers: Optional[Dict[str, str]] = No
     return requests.get(url, headers=h, timeout=timeout)
 
 def fetch_url_resilient(url: str, timeout: int = 20, max_total_attempts: int = 6) -> Tuple[str, str, int]:
+    attempts = 0
     last_exc = None
     order = AUSTLII_MIRRORS[:]
     for attempt in range(1, max_total_attempts + 1):
+        attempts = attempt
         mirror = order[(attempt - 1) % len(order)]
         try_url = rewrite_url_to_mirror(url, mirror)
         try:
@@ -222,7 +208,7 @@ def fetch_url_resilient(url: str, timeout: int = 20, max_total_attempts: int = 6
             if 500 <= r.status_code < 600:
                 raise requests.HTTPError(f"{r.status_code} server error for {try_url}")
             r.raise_for_status()
-            return r.text, mirror, attempt
+            return r.text, mirror, attempts
         except Exception as e:
             last_exc = e
             backoff = min(6.0, 0.6 * (2 ** (attempt - 1))) + random.uniform(0, 0.25)
@@ -231,7 +217,6 @@ def fetch_url_resilient(url: str, timeout: int = 20, max_total_attempts: int = 6
     assert last_exc is not None
     raise last_exc
 
-# ---------------- Scrape helpers ----------------
 def soup_from_html(html: str) -> BeautifulSoup:
     return BeautifulSoup(html, "html.parser")
 
@@ -277,7 +262,6 @@ def parse_date_safe(date_str: Optional[str]) -> Optional[datetime]:
             continue
     return None
 
-# ---------------- Resolve by citation or search ----------------
 COURT_PATHS: Dict[str, Tuple[str, str]] = {
     "HCA": ("cth", "HCA"),
     "FCA": ("cth", "FCA"),
@@ -353,9 +337,8 @@ def resolve_or_search_case_url(query: Optional[str], url: Optional[str]) -> Tupl
 
     return None, "none"
 
-# ---------------- High Court fallback (optional) ----------------
 HCA_PDF_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; Lexionary/1.4.2; +https://lexionary.com.au)",
+    "User-Agent": "Mozilla/5.0 (compatible; Lexionary/1.7.0; +https://lexionary.com.au)",
     "Accept": "application/pdf,*/*",
     "Referer": "https://www.hcourt.gov.au/",
 }
@@ -394,7 +377,6 @@ def try_fetch_hca_pdf(year: str, number: str, query_hint: str = "") -> Tuple[Opt
         log.warning("HCA search failed: %s", e)
         return None, None, "HCA search error"
 
-# ---------------- Verification ----------------
 def verify_case_page(html: str, resolved_url: Optional[str]) -> Dict[str, Any]:
     title, citation_on_page, date_str = extract_title_citation_date(html)
     txt = clean_case_html_to_text(html)
@@ -434,7 +416,6 @@ def verify_case_page(html: str, resolved_url: Optional[str]) -> Dict[str, Any]:
         "clean_text": txt,
     }
 
-# ---------------- Prompting ----------------
 DEPTH_HINT = {
     "concise": "Output must be tight and exam ready. Use bullets. Target 120 to 180 words total.",
     "standard": "Balanced depth with short paragraphs. Target about 250 to 400 words.",
@@ -518,13 +499,12 @@ SOURCE TEXT (verbatim, truncated):
 def call_openai(system_msg: str, user_msg: str) -> str:
     return _openai.chat(system=system_msg, user=user_msg, max_tokens=900, temperature=0.2)
 
-# ---------------- Root + health + brief routes ----------------
 @app.get("/")
 def root():
     return {
         "ok": True,
         "service": "Lexionary v3 - Brief API + Lexcite",
-        "endpoints": ["/health", "/brief", "/lexcite/format", "/cite"],
+        "endpoints": ["/health", "/brief", "/cite", "/lexcite/format"],
         "version": "1.7.0",
         "has_pdfminer": HAS_PDFMINER,
     }
@@ -566,7 +546,6 @@ def brief(req: BriefRequest, request: Request):
             log.warning("AustLII fetch failed: %s", e_first)
 
     hca_fallback_used = False
-    hca_pdf_url = None
     hca_fallback_reason = None
     m = NEUTRAL_CIT_RE.match((req.query or "").strip()) if req.query else None
     if ((html is None) or (verify_info and not verify_info.get("ok"))) and m and m.group(2).upper() == "HCA":
@@ -575,7 +554,6 @@ def brief(req: BriefRequest, request: Request):
         hca_fallback_reason = reason
         if extracted_text and len(extracted_text) > 1000:
             hca_fallback_used = True
-            hca_pdf_url = pdf_url
             verify_info = {
                 "ok": True,
                 "reason": "",
@@ -599,7 +577,7 @@ def brief(req: BriefRequest, request: Request):
         verify_info = {
             "ok": True,
             "reason": "unverified_direct_text",
-            "title": (direct_text_candidate[:80] + "…") if len(direct_text_candidate) > 80 else direct_text_candidate,
+            "title": (direct_text_candidate[:80] + "...") if len(direct_text_candidate) > 80 else direct_text_candidate,
             "citation_on_page": extract_neutral_citation(direct_text_candidate) or "",
             "decision_date": None,
             "text_length": len(direct_text_candidate),
@@ -682,7 +660,7 @@ async def cite(req: CitationRequest):
             "text": result.text,
             "html": result.html,
         }
-    except PydValidationError as ve:
+    except ValidationError as ve:
         raise HTTPException(
             status_code=400,
             detail={
@@ -701,138 +679,12 @@ async def cite(req: CitationRequest):
             },
         )
 
-# -------------------------------------------------------------------------
-# LEXCITE PASTE MODE (DETECTION + WARNINGS + HTML ITALICS)
-# -------------------------------------------------------------------------
+# ---------------- Lexcite paste list endpoint ----------------
 
-def detect_source_type(raw: str) -> str:
-    text = (raw or "").strip()
-    if not text:
-        return "OTHER"
-    if "<http" in text or "<https" in text or re.search(r"https?://", text):
-        return "WEBSITE"
-    if re.search(r"\bAct\s+\d{4}\b", text) or re.search(r"\bRegulations?\b", text):
-        return "LEGISLATION"
-    if "'" in text and re.search(r"\(\d{4}\)\s*\d+(\(\d+\))?\s+.+\s+\d+", text):
-        return "JOURNAL"
-    if re.search(r"\([^,]+,\s*\d+(st|nd|rd|th)\s+ed,\s*\d{4}\)", text):
-        return "BOOK"
-    if " v " in text or " v. " in text or re.search(r"\[\d{4}\]\s+[A-Z]{2,7}\s+\d{1,4}", text):
-        return "CASE"
-    return "OTHER"
-
-def _safe_italics_guess_for_list(source_type: str, formatted_plain: str) -> str:
-    """
-    Best-effort italics for paste mode.
-    We only apply <i> tags. The frontend still sanitises to allow only <i>.
-    """
-    s = formatted_plain or ""
-    st = (source_type or "OTHER").upper()
-
-    if st == "CASE":
-        # Italicise case name up to first neutral or reported citation token.
-        m = re.search(r"\s(\[\d{4}\]\s+[A-Z]{2,7}\s+\d{1,4}|\(\d{4}\)\s+\d+\s+[A-Z]{2,}\s+\d+|\[\d{4}\]\s+\d+\s+[A-Z]{2,}\s+\d+)", s)
-        if m:
-            name = s[: m.start()].strip()
-            rest = s[m.start():].lstrip()
-            if name:
-                return f"<i>{name}</i> {rest}"
-        return s
-
-    if st == "LEGISLATION":
-        # Italicise "Title Year" before (Jur)
-        m = re.search(r"\s\([A-Za-z]{2,6}\)", s)
-        if m:
-            left = s[: m.start()].strip()
-            right = s[m.start():].lstrip()
-            if left:
-                return f"<i>{left}</i> {right}"
-        return s
-
-    if st == "BOOK":
-        # Italicise title between first comma and first parenthesis.
-        # "Author, Title (Publisher, ed, year)."
-        m = re.search(r"^(.*?,)\s+(.+?)\s+\(", s)
-        if m:
-            a = m.group(1)
-            title = m.group(2)
-            tail = s[m.end(2):].lstrip()
-            return f"{a} <i>{title}</i>{tail}"
-        return s
-
-    if st == "JOURNAL":
-        # Italicise journal title just before final page number.
-        # "... (Year) Vol(Issue) Journal Title 101"
-        m = re.search(r"(\)\s*\d+(?:\(\d+\))?\s+)(.+?)(\s+\d+)(?:,|\.)", s)
-        if m:
-            pre = s[: m.start(2)]
-            jt = m.group(2).strip()
-            post = s[m.end(2):]
-            return f"{pre}<i>{jt}</i>{post}"
-        return s
-
-    return s
-
-def process_lexcite_line(idx: int, raw: str) -> LexciteEntry:
-    st = detect_source_type(raw)
-    formatted = raw
-    formatted_html = raw
-    validated = False
-    validation_errors: List[str] = []
-    meta: Dict[str, Any] = {}
-
-    # Paste mode is "tidy + warn" not "builder-grade validation"
-    if st in {"CASE", "LEGISLATION", "JOURNAL", "BOOK", "WEBSITE"}:
-        validated = True
-        formatted = raw.strip()
-        formatted_html = _safe_italics_guess_for_list(st, formatted)
-    else:
-        validated = False
-        validation_errors.append("Unsupported or unrecognised source type in paste mode. Use Build one citation for accuracy.")
-        formatted = raw.strip()
-        formatted_html = formatted
-
-    return LexciteEntry(
-        id=str(idx),
-        raw=raw,
-        source_type=st,
-        formatted=formatted,
-        formatted_html=formatted_html,
-        validated=validated,
-        validation_errors=validation_errors,
-        meta=meta,
-    )
-
-# ---------------- Lexcite guardrail constants ----------------
 LEXCITE_MAX_CHARS = 8000
 LEXCITE_MAX_LINES = 50
 LEXCITE_MIN_LINE_LEN = 4
-LEXCITE_MAX_LINE_LEN = 400
-LEXCITE_ESSAY_LINE_LEN = 500
-
-def looks_like_essay_single_line(text: str) -> bool:
-    if len(text) < LEXCITE_ESSAY_LINE_LEN:
-        return False
-    lower = text.lower()
-    citation_signals = [" v ", " v. ", " act ", " regulation", "<http", "<https"]
-    year_pattern = re.search(r"\(\d{4}\)", text) or re.search(r"\[\d{4}\]", text)
-    if any(sig in lower for sig in citation_signals):
-        return False
-    if year_pattern:
-        return False
-    return True
-
-def make_length_error_entry(idx: int, raw: str, reason: str) -> LexciteEntry:
-    return LexciteEntry(
-        id=str(idx),
-        raw=raw,
-        source_type="OTHER",
-        formatted=raw,
-        formatted_html=raw,
-        validated=False,
-        validation_errors=[reason],
-        meta={"length_violation": True},
-    )
+LEXCITE_MAX_LINE_LEN = 500
 
 @app.post("/lexcite/format", response_model=LexciteResponse)
 def lexcite_format(req: LexciteRequest, request: Request):
@@ -840,63 +692,77 @@ def lexcite_format(req: LexciteRequest, request: Request):
     raw_text = (req.input_text or "").strip()
 
     if not raw_text:
-        return LexciteResponse(
-            api_version=api_version,
-            entries=[],
-            errors=["No input provided. Paste at least one citation."],
-        )
+        return LexciteResponse(api_version=api_version, entries=[], errors=["No input provided. Paste at least one citation."])
 
     total_chars = len(raw_text)
     if total_chars > LEXCITE_MAX_CHARS:
-        msg = (
-            f"Input too long. Lexcite currently supports up to {LEXCITE_MAX_CHARS} "
-            f"characters across all citations. You submitted {total_chars} characters."
+        return LexciteResponse(
+            api_version=api_version,
+            entries=[],
+            errors=[f"Input too long. Max {LEXCITE_MAX_CHARS} characters. You submitted {total_chars} characters."],
         )
-        return LexciteResponse(api_version=api_version, entries=[], errors=[msg])
 
     lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
-    total_lines = len(lines)
-    if total_lines == 0:
+    if not lines:
         return LexciteResponse(api_version=api_version, entries=[], errors=["No usable lines detected. Put one citation per line."])
 
-    if total_lines > LEXCITE_MAX_LINES:
-        msg = (
-            f"Too many lines. Lexcite currently supports up to {LEXCITE_MAX_LINES} "
-            f"citations per run. You submitted {total_lines} lines."
+    if len(lines) > LEXCITE_MAX_LINES:
+        return LexciteResponse(
+            api_version=api_version,
+            entries=[],
+            errors=[f"Too many lines. Max {LEXCITE_MAX_LINES} citations per run. You submitted {len(lines)} lines."],
         )
-        return LexciteResponse(api_version=api_version, entries=[], errors=[msg])
-
-    if total_lines == 1 and looks_like_essay_single_line(lines[0]):
-        msg = (
-            "This looks like paragraph or assignment text, not citations. "
-            "Lexcite expects one citation per line. Paste your reference list instead."
-        )
-        return LexciteResponse(api_version=api_version, entries=[], errors=[msg])
 
     entries: List[LexciteEntry] = []
     errors: List[str] = []
 
     for idx, line in enumerate(lines, start=1):
+        line_len = len(line)
+
+        if line_len < LEXCITE_MIN_LINE_LEN:
+            entries.append(
+                LexciteEntry(
+                    id=str(idx),
+                    raw=line,
+                    source_type="OTHER",
+                    formatted=line,
+                    formatted_html=line,
+                    validated=False,
+                    validation_errors=[f"Line {idx} is too short to be a citation."],
+                    meta={"length_violation": True},
+                )
+            )
+            continue
+
+        if line_len > LEXCITE_MAX_LINE_LEN:
+            entries.append(
+                LexciteEntry(
+                    id=str(idx),
+                    raw=line,
+                    source_type="OTHER",
+                    formatted=line,
+                    formatted_html=line,
+                    validated=False,
+                    validation_errors=[f"Line {idx} is too long to be a single citation. Split it."],
+                    meta={"length_violation": True},
+                )
+            )
+            continue
+
         try:
-            line_len = len(line)
-            if line_len < LEXCITE_MIN_LINE_LEN:
-                entry = make_length_error_entry(
-                    idx, line,
-                    f"Line {idx} is too short to be a citation (length {line_len}). Please provide a complete citation."
+            pe = format_freeform_line(line)
+            entries.append(
+                LexciteEntry(
+                    id=str(idx),
+                    raw=line,
+                    source_type=pe.source_type,
+                    formatted=pe.text,
+                    formatted_html=pe.html,
+                    validated=pe.validated,
+                    validation_errors=pe.validation_errors,
+                    meta=pe.meta,
                 )
-                entries.append(entry)
-                continue
-
-            if line_len > LEXCITE_MAX_LINE_LEN:
-                entry = make_length_error_entry(
-                    idx, line,
-                    f"Line {idx} is too long to be a single citation (length {line_len}). Split into separate citations."
-                )
-                entries.append(entry)
-                continue
-
-            entry = process_lexcite_line(idx, line)
-            entries.append(entry)
+            )
         except Exception as e:
             log.exception("Lexcite processing failed for line %d: %s", idx, line)
             errors.append(f"Error processing line {idx}: {e}")
