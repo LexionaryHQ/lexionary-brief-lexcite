@@ -1,47 +1,33 @@
 # main.py - Lexionary v3 Brief API + Lexcite AGLC Engine
 # Version: 1.7.0
-# - Keeps existing /brief IRAC endpoint behaviour.
-# - Adds robust, frontend-friendly /cite endpoint with consistent JSON errors.
-# - Keeps existing /lexcite/format hardening.
 # Run: uvicorn main:app --host 0.0.0.0 --port 8000
 
 import os, re, time, logging, urllib.parse, random, json
 from datetime import datetime
-from typing import List, Optional, Dict, Any, Tuple, Union
+from typing import List, Optional, Dict, Any, Tuple
 
 import requests
 from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field
-from pydantic import ValidationError
-
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 
 from aglc_engine import format_citation, SourceType
+
 
 # ---------------------------------------------------------------------------
 # Helper to pull out neutral citation from a longer string
 # ---------------------------------------------------------------------------
 
-def extract_neutral_citation(user_input: str) -> Optional[str]:
-    """
-    Extracts a neutral citation like:
-      [2025] NSWCA 243
-      [1992] HCA 23
-      [2010] FCAFC 75
-    from any longer string that may also contain party names or extra text.
-    """
+def extract_neutral_citation(user_input: str) -> str | None:
     if not user_input:
         return None
-
-    text = " ".join(user_input.split())  # normalise whitespace
+    text = " ".join(user_input.split())
     pattern = r"\[\d{4}\]\s+\S+\s+\d+"
-
     match = re.search(pattern, text)
     if match:
         return match.group(0).strip()
-
     return None
 
 
@@ -61,6 +47,7 @@ except Exception:
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("lexionary")
+
 
 # ---------------- OpenAI client ----------------
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
@@ -129,8 +116,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------- Models ----------------
 
+# ---------------- Models ----------------
 class BriefRequest(BaseModel):
     query: Optional[str] = Field(None, description="Case name or neutral citation or direct text")
     url: Optional[str] = Field(None, description="AustLII judgment URL")
@@ -147,16 +134,25 @@ class BriefResponse(BaseModel):
     meta: Dict[str, Any] = Field(default_factory=dict)
 
 
-# Lexcite models
+# Lexcite /cite model (builder)
+class CitationRequest(BaseModel):
+    source_type: SourceType | str
+    data: dict
+    mode: str = "footnote"
+
+
+# Lexcite paste list models
 class LexciteRequest(BaseModel):
     input_text: str = Field(..., description="One or more citations separated by newlines.")
+    mode: str = Field(default="footnote", description="footnote or bibliography")
 
 
 class LexciteEntry(BaseModel):
     id: str
     raw: str
     source_type: str
-    formatted: str
+    formatted_text: str = ""
+    formatted_html: str = ""
     validated: bool
     validation_errors: List[str]
     meta: Dict[str, Any] = Field(default_factory=dict)
@@ -166,23 +162,6 @@ class LexciteResponse(BaseModel):
     api_version: str
     entries: List[LexciteEntry]
     errors: List[str] = Field(default_factory=list)
-
-
-# /cite models (frontend-friendly)
-class CitationRequest(BaseModel):
-    source_type: Union[SourceType, str]
-    data: dict
-    mode: str = "footnote"
-
-
-class CitationResponse(BaseModel):
-    success: bool
-    source_type: str
-    mode: str
-    text: str
-    html: str
-    error: Optional[str] = None
-    messages: List[dict] = Field(default_factory=list)
 
 
 # ---------------- AustLII constants ----------------
@@ -204,21 +183,13 @@ AUSTLII_HEADERS = {
 
 
 def looks_like_judgment_url(url: str) -> bool:
-    """
-    Returns True for anything that looks like an AustLII judgment HTML URL, for example:
-      /cgi-bin/viewdoc/au/cases/cth/HCA/1992/23.html
-      /cgi-bin/viewdoc/au/cases/hca/1992/23.html
-      /cgi-bin/viewdoc/au/cases/nsw/NSWCA/2025/12.html
-    """
     return "/cgi-bin/viewdoc/au/cases/" in url and url.endswith(".html")
 
 
 def rewrite_url_to_mirror(url: str, mirror: str) -> str:
     parsed = urllib.parse.urlparse(url)
     mpar = urllib.parse.urlparse(mirror)
-    return urllib.parse.urlunparse(
-        (mpar.scheme, mpar.netloc, parsed.path, parsed.params, parsed.query, parsed.fragment)
-    )
+    return urllib.parse.urlunparse((mpar.scheme, mpar.netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
 
 
 # ---------------- Basic rate limit ----------------
@@ -289,10 +260,7 @@ def clean_case_html_to_text(html: str) -> str:
 
 
 CITATION_ON_PAGE_RE = re.compile(r"\[\d{4}\]\s+[A-Z]{2,7}\s+\d{1,4}")
-DATE_RE = re.compile(
-    r"(\d{1,2}\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4})",
-    re.I,
-)
+DATE_RE = re.compile(r"(\d{1,2}\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4})", re.I)
 
 
 def extract_title_citation_date(html: str) -> Tuple[str, str, Optional[str]]:
@@ -323,40 +291,28 @@ def parse_date_safe(date_str: Optional[str]) -> Optional[datetime]:
 
 # ---------------- Resolve by citation or search ----------------
 COURT_PATHS: Dict[str, Tuple[str, str]] = {
-    # Cth
     "HCA": ("cth", "HCA"),
     "FCA": ("cth", "FCA"),
     "FCAFC": ("cth", "FCAFC"),
-    # NSW
     "NSWCA": ("nsw", "NSWCA"),
     "NSWSC": ("nsw", "NSWSC"),
-    # VIC
     "VSCA": ("vic", "VSCA"),
     "VSC": ("vic", "VSC"),
-    # QLD
     "QCA": ("qld", "QCA"),
     "QSC": ("qld", "QSC"),
-    # SA
     "SASCFC": ("sa", "SASCFC"),
     "SASC": ("sa", "SASC"),
-    # WA
     "WASCA": ("wa", "WASCA"),
     "WASC": ("wa", "WASC"),
-    # TAS
     "TASFC": ("tas", "TASFC"),
     "TASSC": ("tas", "TASSC"),
-    # ACT
     "ACTCA": ("act", "ACTCA"),
     "ACTSC": ("act", "ACTSC"),
-    # NT
     "NTCA": ("nt", "NTCA"),
     "NTSC": ("nt", "NTSC"),
 }
 
-NEUTRAL_CIT_RE = re.compile(
-    r"^\s*\[?(\d{4})\]?\s+([A-Z]{2,7})\s+(\d{1,4})(?:\s*\(.*?\))?(?:\s*;.*)?\s*$",
-    re.I,
-)
+NEUTRAL_CIT_RE = re.compile(r"^\s*\[?(\d{4})\]?\s+([A-Z]{2,7})\s+(\d{1,4})(?:\s*\(.*?\))?(?:\s*;.*)?\s*$", re.I)
 
 
 def resolve_from_citation(q: str) -> Optional[str]:
@@ -391,7 +347,6 @@ def austlii_name_search_first_result(query: str) -> Optional[str]:
 
 
 def resolve_or_search_case_url(query: Optional[str], url: Optional[str]) -> Tuple[Optional[str], str]:
-    # 1. Direct AustLII URL
     if url:
         if looks_like_judgment_url(url):
             return url, "direct"
@@ -399,7 +354,6 @@ def resolve_or_search_case_url(query: Optional[str], url: Optional[str]) -> Tupl
             return None, "invalid-direct"
         raise HTTPException(status_code=400, detail="Only direct AustLII judgment URLs supported in 'url'.")
 
-    # 2. Query - neutral citation or case name
     if query:
         neutral = extract_neutral_citation(query) or query
         c = resolve_from_citation(neutral)
@@ -420,12 +374,7 @@ HCA_PDF_HEADERS = {
 }
 
 
-def try_fetch_hca_pdf(
-    year: str, number: str, query_hint: str = ""
-) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    """
-    Returns (text, source_url, reason_if_none). Requires pdfminer.six.
-    """
+def try_fetch_hca_pdf(year: str, number: str, query_hint: str = "") -> Tuple[Optional[str], Optional[str], Optional[str]]:
     if not HAS_PDFMINER:
         return None, None, "pdfminer.six not installed"
 
@@ -534,14 +483,7 @@ Authority selection rules:
 """
 
 
-def build_irac_prompt(
-    case_name_or_citation: str,
-    case_text: str,
-    pinpoints: List[str],
-    depth: str,
-    jurisdiction: str,
-    tone: str,
-) -> Dict[str, str]:
+def build_irac_prompt(case_name_or_citation: str, case_text: str, pinpoints: List[str], depth: str, jurisdiction: str, tone: str) -> Dict[str, str]:
     depth_note = DEPTH_HINT.get(depth, "Balanced depth.")
     tone_note = TONE_HINT.get(tone, "Neutral academic tone.")
     jur_note = JUR_HINT.get(jurisdiction, "Use Australian authorities and terminology.")
@@ -594,7 +536,7 @@ def root():
     return {
         "ok": True,
         "service": "Lexionary v3 - Brief API + Lexcite",
-        "endpoints": ["/health", "/brief", "/lexcite/format", "/cite"],
+        "endpoints": ["/health", "/brief", "/cite", "/lexcite/format"],
         "version": "1.7.0",
         "has_pdfminer": HAS_PDFMINER,
     }
@@ -619,13 +561,11 @@ def health():
 def brief(req: BriefRequest, request: Request):
     t0 = time.time()
 
-    # Allow query, url OR text
     if not (req.query or req.url or req.text):
         raise HTTPException(status_code=400, detail="Provide 'query', 'url', or 'text'.")
 
     resolved_url, strategy = resolve_or_search_case_url(req.query, req.url)
 
-    # Try AustLII first, including mirrors
     html: Optional[str] = None
     mirror_used = ""
     attempts = 0
@@ -639,9 +579,7 @@ def brief(req: BriefRequest, request: Request):
         except Exception as e_first:
             log.warning("AustLII fetch failed: %s", e_first)
 
-    # If AustLII failed or verify failed and looks like HCA, try optional HCA PDF fallback
     hca_fallback_used = False
-    hca_pdf_url = None
     hca_fallback_reason = None
     m = NEUTRAL_CIT_RE.match((req.query or "").strip()) if req.query else None
     if ((html is None) or (verify_info and not verify_info.get("ok"))) and m and m.group(2).upper() == "HCA":
@@ -650,7 +588,6 @@ def brief(req: BriefRequest, request: Request):
         hca_fallback_reason = reason
         if extracted_text and len(extracted_text) > 1000:
             hca_fallback_used = True
-            hca_pdf_url = pdf_url
             verify_info = {
                 "ok": True,
                 "reason": "",
@@ -663,7 +600,6 @@ def brief(req: BriefRequest, request: Request):
             source_url_used = pdf_url
             strategy = "hca_pdf"
 
-    # Direct text fallback: prefer explicit `text`, then long `query`
     direct_text_candidate = (req.text or "").strip()
     if not direct_text_candidate and req.query:
         q_stripped = req.query.strip()
@@ -684,7 +620,6 @@ def brief(req: BriefRequest, request: Request):
         strategy = "direct_text"
         source_url_used = None
 
-    # If still nothing, fail with explicit verification error
     if not verify_info or not verify_info.get("ok"):
         meta = {
             "elapsed_ms": int((time.time() - t0) * 1000),
@@ -708,7 +643,6 @@ def brief(req: BriefRequest, request: Request):
             meta=meta,
         )
 
-    # Build prompt and call OpenAI
     case_label = req.query or source_url_used or "Unknown case"
     payload = build_irac_prompt(
         case_name_or_citation=case_label,
@@ -746,459 +680,37 @@ def brief(req: BriefRequest, request: Request):
     return BriefResponse(success=True, brief=brief_text, meta=meta)
 
 
-# ---------------- /cite (updated, consistent errors) ----------------
-@app.post("/cite", response_model=CitationResponse)
+@app.post("/cite")
 async def cite(req: CitationRequest):
-    """
-    Deterministic formatting endpoint used by the structured builder UI.
-    Always returns a JSON body with:
-      success: true/false
-      error/messages when false
-
-    This avoids FastAPI's nested HTTPException detail structures that are awkward in frontend JS.
-    """
     try:
         result = format_citation(
             source_type=req.source_type,
             data=req.data,
-            mode=req.mode,
+            mode=req.mode,  # footnote or bibliography
         )
-        return CitationResponse(
-            success=True,
-            source_type=result.source_type.value,
-            mode=result.mode,
-            text=result.text,
-            html=result.html,
-        )
-    except ValidationError as ve:
-        return JSONResponse(
-            status_code=400,
-            content=CitationResponse(
-                success=False,
-                source_type=str(req.source_type),
-                mode=req.mode,
-                text="",
-                html="",
-                error="validation_error",
-                messages=ve.errors(),
-            ).model_dump(),
-        )
-    except ValueError as e:
-        return JSONResponse(
-            status_code=400,
-            content=CitationResponse(
-                success=False,
-                source_type=str(req.source_type),
-                mode=req.mode,
-                text="",
-                html="",
-                error="validation_error",
-                messages=[{"msg": str(e)}],
-            ).model_dump(),
-        )
-    except Exception as e:
-        log.exception("Cite failed: %s", e)
-        return JSONResponse(
-            status_code=500,
-            content=CitationResponse(
-                success=False,
-                source_type=str(req.source_type),
-                mode=req.mode,
-                text="",
-                html="",
-                error="server_error",
-                messages=[{"msg": str(e)}],
-            ).model_dump(),
-        )
-
-
-# -------------------------------------------------------------------------
-# LEXCITE ENGINE (AGLC DETECTION + METADATA + WEBSITE SUPPORT)
-# -------------------------------------------------------------------------
-
-def detect_source_type(raw: str) -> str:
-    """
-    Basic source type detection for Lexcite.
-    Types: CASE, LEGISLATION, JOURNAL, BOOK, WEBSITE, OTHER
-    """
-    text = (raw or "").strip()
-    if not text:
-        return "OTHER"
-
-    # Website detection - URL present, often in <...>
-    if "<http" in text or "<https" in text or re.search(r"https?://", text):
-        if "<" in text and ">" in text:
-            return "WEBSITE"
-        if re.search(
-            r"\b(Guardian|ABC|SBS|Sydney Morning Herald|The Conversation|The Age|News\.com\.au)\b",
-            text,
-            re.I,
-        ):
-            return "WEBSITE"
-
-    # Legislation - Act/Regulation with year + jurisdiction
-    if re.search(r"\bAct\s+\d{4}\b", text) or re.search(r"\bRegulations?\b", text):
-        return "LEGISLATION"
-
-    # Journal article - quotes + (year) vol(issue) Journal page
-    if "'" in text and re.search(r"\(\d{4}\)\s*\d+\(\d+\)\s+.+\s+\d+$", text):
-        return "JOURNAL"
-
-    # Book - title + (Publisher, ed, year)
-    if re.search(r"\([^,]+,\s*\d+(st|nd|rd|th)\s+ed,\s*\d{4}\)", text):
-        return "BOOK"
-
-    # Case - " v " plus (year) vol reporter page or neutral style
-    if " v " in text or " v. " in text:
-        return "CASE"
-
-    return "OTHER"
-
-
-def extract_case_metadata_simple(raw: str) -> Dict[str, Any]:
-    meta: Dict[str, Any] = {}
-    s = raw.strip()
-    # Reported case pattern
-    m = re.search(
-        r"^(?P<case_name>.+?)\s*\((?P<year>\d{4})\)\s+(?P<volume>\d+)\s+(?P<reporter>[A-Z]+)\s+(?P<page>\d+)",
-        s,
-    )
-    if m:
-        meta.update(
-            {
-                "case_name": m.group("case_name").strip(),
-                "year": m.group("year"),
-                "volume": m.group("volume"),
-                "reporter": m.group("reporter"),
-                "page_start": m.group("page"),
-            }
-        )
-    else:
-        # Try to at least pull case name and maybe year
-        m2 = re.search(r"^(?P<case_name>.+?)(\s*\((?P<year>\d{4})\))?", s)
-        if m2:
-            meta["case_name"] = (m2.group("case_name") or "").strip()
-            if m2.group("year"):
-                meta["year"] = m2.group("year")
-    return meta
-
-
-def extract_legislation_metadata_simple(raw: str) -> Dict[str, Any]:
-    """
-    Very simple parser for legislation references like:
-      Fair Work Act 2009 (Cth)
-      Civil Liability Act 2002 (NSW) s 5B
-      Limitation Act 1969 (NSW) ss 12(1), 18A
-    It now tolerates mixed case jurisdictions such as Cth, NSW, Vic, Qld.
-    """
-    meta: Dict[str, Any] = {}
-    s = raw.strip()
-
-    m = re.search(
-        r"^(?P<title>.+?)\s+(?P<year>\d{4})\s*\(\s*(?P<jurisdiction>[A-Za-z]{2,6})\s*\)\s*(?P<provision>.+)?$",
-        s,
-    )
-    if not m:
-        m = re.search(
-            r"^(?P<title>.+?)\s+(?P<year>\d{4})\s+(?P<jurisdiction>[A-Za-z]{2,6})\s*(?P<provision>.+)?$",
-            s,
-        )
-
-    if m:
-        title = m.group("title").strip()
-        year = m.group("year")
-        jurisdiction_raw = (m.group("jurisdiction") or "").strip()
-        provision = m.group("provision")
-
-        meta["title"] = title
-        meta["year"] = year
-        meta["jurisdiction"] = jurisdiction_raw
-        if provision:
-            meta["provision"] = provision.strip()
-
-    return meta
-
-
-def extract_journal_metadata_simple(raw: str) -> Dict[str, Any]:
-    meta: Dict[str, Any] = {}
-    s = raw.strip()
-    m = re.search(
-        r"^(?P<author>[^,]+(?:, [^,]+)*),\s*'(?P<title>[^']+)'\s*\((?P<year>\d{4})\)\s*(?P<volume>\d+)\((?P<issue>\d+)\)\s+(?P<journal>.+?)\s+(?P<page>\d+)$",
-        s,
-    )
-    if m:
-        meta.update(
-            {
-                "author": m.group("author").strip(),
-                "article_title": m.group("title").strip(),
-                "year": m.group("year"),
-                "volume": m.group("volume"),
-                "issue": m.group("issue"),
-                "journal_title": m.group("journal").strip(),
-                "page_start": m.group("page"),
-            }
-        )
-    return meta
-
-
-def extract_book_metadata_simple(raw: str) -> Dict[str, Any]:
-    meta: Dict[str, Any] = {}
-    s = raw.strip()
-    m = re.search(
-        r"^(?P<author>.+?),\s*(?P<title>.+?)\s*\((?P<publisher>[^,]+),\s*(?P<edition>[^,]+),\s*(?P<year>\d{4})\)$",
-        s,
-    )
-    if m:
-        meta.update(
-            {
-                "author": m.group("author").strip(),
-                "title": m.group("title").strip(),
-                "publisher": m.group("publisher").strip(),
-                "edition": m.group("edition").strip(),
-                "year": m.group("year"),
-            }
-        )
-    return meta
-
-
-def format_today_aus() -> str:
-    today = datetime.now()
-    try:
-        return today.strftime("%-d %B %Y")
-    except Exception:
-        return today.strftime("%d %B %Y").lstrip("0")
-
-
-def extract_website_metadata_llm(raw: str) -> Dict[str, Any]:
-    """
-    Use LLM to extract website metadata for AGLC style citation.
-    Returns dict with keys: author, title, publisher, date, url, confidence.
-    """
-    base = {"raw": raw, "confidence": 0.0}
-    text = raw.strip()
-    if not text:
-        return base
-
-    url_match = re.search(r"<(https?://[^>]+)>", text)
-    if not url_match:
-        url_match = re.search(r"(https?://\S+)", text)
-    if url_match:
-        base["url"] = url_match.group(1)
-
-    if _openai.mode not in ("new", "legacy") or not OPENAI_API_KEY:
-        return base
-
-    system = (
-        "You extract metadata for website citations in AGLC4 style. "
-        "Your job is ONLY to parse the input, not to invent details. "
-        "If any field is missing or uncertain, leave it blank and lower the confidence. "
-        "Respond ONLY with a single JSON object, no commentary."
-    )
-    user = f"""
-Input text (may be a partial or full citation for a website article):
-
-{raw}
-
-Extract:
-- author (personal name or organisation)
-- title (article title, without quotes)
-- publisher (news outlet, organisation, website)
-- date (publication date in format '20 April 2020' if present)
-- url (https://...)
-- confidence (0.0 to 1.0)
-
-Return JSON:
-
-{{
-  "author": "...",
-  "title": "...",
-  "publisher": "...",
-  "date": "...",
-  "url": "...",
-  "confidence": 0.0
-}}"""
-
-    try:
-        resp = _openai.chat(system, user, max_tokens=350, temperature=0.0)
-        data = json.loads(resp)
-        if isinstance(data, dict):
-            for key in ("author", "title", "publisher", "date", "url", "confidence"):
-                if key in data and data[key] is not None:
-                    base[key] = data[key]
-    except Exception as e:
-        log.warning("LLM website metadata extraction failed: %s", e)
-
-    try:
-        base["confidence"] = float(base.get("confidence", 0.0))
-    except Exception:
-        base["confidence"] = 0.0
-
-    if not base.get("url") and url_match:
-        base["url"] = url_match.group(1)
-
-    return base
-
-
-def process_lexcite_line(idx: int, raw: str) -> LexciteEntry:
-    source_type = detect_source_type(raw)
-    formatted = raw
-    validated = False
-    validation_errors: List[str] = []
-    meta: Dict[str, Any] = {}
-
-    if source_type == "CASE":
-        meta = extract_case_metadata_simple(raw)
-        missing = []
-        case_name = meta.get("case_name")
-        year = meta.get("year")
-        volume = meta.get("volume")
-        reporter = meta.get("reporter")
-        page = meta.get("page_start")
-        if not case_name:
-            missing.append("case name")
-        if not year:
-            missing.append("year")
-        if not (volume and reporter and page):
-            missing.append("law report citation (volume, reporter, page)")
-        if missing:
-            validated = False
-            validation_errors.append(
-                "Looks like a case, but missing " + ", ".join(missing) +
-                ". Please add these details before Lexcite can validate it."
-            )
-        else:
-            validated = True
-        meta["confidence"] = meta.get("confidence", 0.9)
-
-    elif source_type == "LEGISLATION":
-        meta = extract_legislation_metadata_simple(raw)
-        missing = []
-        if not meta.get("title"):
-            missing.append("title")
-        if not meta.get("year"):
-            missing.append("year")
-        if not meta.get("jurisdiction"):
-            missing.append("jurisdiction")
-        if missing:
-            validated = False
-            validation_errors.append(
-                "Looks like legislation, but is missing: " + ", ".join(missing) +
-                ". Please include the full title, year and jurisdiction before Lexcite can validate it."
-            )
-        else:
-            validated = True
-        meta["confidence"] = meta.get("confidence", 0.9)
-
-    elif source_type == "JOURNAL":
-        meta = extract_journal_metadata_simple(raw)
-        missing = []
-        field_map = [
-            ("author", "author"),
-            ("article_title", "article title"),
-            ("year", "year"),
-            ("volume", "volume"),
-            ("issue", "issue"),
-            ("journal_title", "journal title"),
-            ("page_start", "starting page"),
-        ]
-        for fkey, fname in field_map:
-            if not meta.get(fkey):
-                missing.append(fname)
-        if missing:
-            validated = False
-            validation_errors.append(
-                "Looks like a journal article, but is missing: " + ", ".join(missing) +
-                ". Please add these details before Lexcite can validate it."
-            )
-        else:
-            validated = True
-        meta["confidence"] = meta.get("confidence", 0.9)
-
-    elif source_type == "BOOK":
-        meta = extract_book_metadata_simple(raw)
-        missing = []
-        field_map = [
-            ("author", "author or editor"),
-            ("title", "title"),
-            ("publisher", "publisher"),
-            ("edition", "edition"),
-            ("year", "year"),
-        ]
-        for fkey, fname in field_map:
-            if not meta.get(fkey):
-                missing.append(fname)
-        if missing:
-            validated = False
-            validation_errors.append(
-                "Looks like a book, but is missing: " + ", ".join(missing) +
-                ". Please add these details before Lexcite can validate it."
-            )
-        else:
-            validated = True
-        meta["confidence"] = meta.get("confidence", 0.9)
-
-    elif source_type == "WEBSITE":
-        meta = extract_website_metadata_llm(raw)
-        required_fields = ["author", "title", "publisher", "url"]
-        missing_keys = [f for f in required_fields if not meta.get(f)]
-        pretty_name = {
-            "author": "author",
-            "title": "title",
-            "publisher": "publisher or news source",
-            "url": "URL",
+        return {
+            "success": True,
+            "source_type": result.source_type.value,
+            "mode": result.mode,
+            "text": result.text,
+            "html": result.html,
         }
-
-        confidence = meta.get("confidence", 0.0)
-
-        if missing_keys:
-            validated = False
-            human = [pretty_name.get(k, k) for k in missing_keys]
-            validation_errors.append(
-                "This appears to be a website or online article, but is missing: " +
-                ", ".join(human) + ". Please add these details before Lexcite can format it."
-            )
-        else:
-            validated = True
-
-        if confidence < 0.6:
-            validated = False
-            validation_errors.append(
-                "Low confidence in extracted website metadata. Please confirm the author, title, publisher, date and URL before relying on this citation."
-            )
-
-        author = (meta.get("author") or "").strip()
-        title = (meta.get("title") or "").strip()
-        publisher = (meta.get("publisher") or "").strip()
-        date = (meta.get("date") or "").strip()
-        url = (meta.get("url") or "").strip()
-
-        if author and title and publisher and url and not missing_keys:
-            if date:
-                formatted = f"{author}, '{title}' ({publisher}, {date}) <{url}>."
-            else:
-                accessed = format_today_aus()
-                formatted = f"{author}, '{title}' ({publisher}) <{url}> accessed {accessed}."
-        else:
-            formatted = raw
-
-    else:
-        formatted = raw
-        validated = False
-        validation_errors.append("Unsupported source type for automatic formatting in this version.")
-        meta = {}
-
-    return LexciteEntry(
-        id=str(idx),
-        raw=raw,
-        source_type=source_type,
-        formatted=formatted,
-        validated=validated,
-        validation_errors=validation_errors,
-        meta=meta,
-    )
+    except ValidationError as ve:
+        raise HTTPException(
+            status_code=400,
+            detail={"success": False, "error": "validation_error", "messages": ve.errors()},
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={"success": False, "error": "server_error", "message": str(e)},
+        )
 
 
-# ---------------- Lexcite guardrail constants ----------------
+# -------------------------------------------------------------------------
+# LEXCITE PASTE MODE: return true AGLC output (text + html) wherever possible
+# -------------------------------------------------------------------------
+
 LEXCITE_MAX_CHARS = 8000
 LEXCITE_MAX_LINES = 50
 LEXCITE_MIN_LINE_LEN = 4
@@ -1207,31 +719,171 @@ LEXCITE_ESSAY_LINE_LEN = 500
 
 
 def looks_like_essay_single_line(text: str) -> bool:
-    """
-    Coarse check to catch someone pasting an essay or long paragraph instead of citations.
-    One long line, no clear citation features.
-    """
     if len(text) < LEXCITE_ESSAY_LINE_LEN:
         return False
-
     lower = text.lower()
-    citation_signals = [" v ", " v. ", " act ", " regulation", "<http", "<https"]
-    year_pattern = re.search(r"\(\d{4}\)", text) or re.search(r"\[\d{4}\]", text)
-
+    citation_signals = [" v ", " v. ", " act ", " regulation", "<http", "<https", "http://", "https://", "("]
     if any(sig in lower for sig in citation_signals):
         return False
-    if year_pattern:
+    if re.search(r"\(\d{4}\)", text) or re.search(r"\[\d{4}\]", text):
         return False
-
     return True
+
+
+def detect_source_type_line(raw: str) -> SourceType:
+    t = (raw or "").strip()
+
+    if re.search(r"<https?://[^>]+>", t) or re.search(r"https?://\S+", t):
+        return SourceType.WEBSITE
+
+    if re.search(r"\bAct\s+\d{4}\b", t) or re.search(r"\bRegulations?\b", t):
+        return SourceType.LEGISLATION
+
+    if re.search(r"\bv\b", t) or re.search(r"\bv\.\b", t):
+        return SourceType.CASE
+
+    if re.search(r"‘.+’", t) and re.search(r"\(\d{4}\)", t) and re.search(r"\d+\s*$", t):
+        # heuristic journal style
+        return SourceType.JOURNAL_ARTICLE
+
+    return SourceType.WEBSITE  # safest default, but will likely fail validation and show warning
+
+
+def parse_legislation_line(raw: str) -> Optional[dict]:
+    s = raw.strip().rstrip(".")
+    m = re.search(r"^(?P<title>.+?)\s+(?P<year>\d{4})\s*\(\s*(?P<jur>[A-Za-z]{2,6})\s*\)\s*(?P<tail>.*)$", s)
+    if not m:
+        return None
+    title = m.group("title").strip()
+    year = m.group("year").strip()
+    jur = m.group("jur").strip()
+    tail = (m.group("tail") or "").strip()
+
+    unit = None
+    num = None
+    m2 = re.search(r"\b(ss?|sections?)\s+(.+)$", tail, re.I)
+    if m2:
+        unit = m2.group(1)
+        num = m2.group(2).strip()
+
+    return {
+        "title": title,
+        "year": year,
+        "jurisdiction": jur,
+        "is_bill": False,
+        "pinpoint_unit": unit,
+        "pinpoint_number": num,
+    }
+
+
+def parse_case_line(raw: str) -> Optional[dict]:
+    s = raw.strip().rstrip(".")
+    # Neutral: Name [1992] HCA 23
+    m_neutral = re.search(r"^(?P<name>.+?)\s+\[(?P<year>\d{4})\]\s+(?P<court>[A-Za-z]{2,7})\s+(?P<num>\d{1,4})\s*(?P<pin>\[\d+\]|\d+)?$", s)
+    # Reported: Name (1992) 175 CLR 1
+    m_reported = re.search(r"^(?P<name>.+?)\s+\((?P<year>\d{4})\)\s+(?P<vol>\d+)\s+(?P<rep>[A-Z]{2,10})\s+(?P<page>\d+)\s*(?P<pin>\[\d+\]|\d+)?$", s)
+
+    data: dict = {"reporter_series_by_year": False, "neutral_citation_first": True, "unreported": False}
+
+    if m_neutral and not m_reported:
+        data.update({
+            "case_name": m_neutral.group("name").strip(),
+            "year": m_neutral.group("year"),
+            "court": m_neutral.group("court").upper(),
+            "decision_number": m_neutral.group("num"),
+        })
+        pin = m_neutral.group("pin")
+        if pin:
+            if pin.startswith("[") and pin.endswith("]"):
+                data["pinpoint_type"] = "paragraph"
+                data["pinpoint"] = pin.strip("[]")
+            else:
+                data["pinpoint_type"] = "page"
+                data["pinpoint"] = pin
+        data["unreported"] = True
+        return data
+
+    if m_reported:
+        data.update({
+            "case_name": m_reported.group("name").strip(),
+            "year": m_reported.group("year"),
+            "volume": m_reported.group("vol"),
+            "reporter": m_reported.group("rep").upper(),
+            "first_page": m_reported.group("page"),
+        })
+        pin = m_reported.group("pin")
+        if pin:
+            if pin.startswith("[") and pin.endswith("]"):
+                data["pinpoint_type"] = "paragraph"
+                data["pinpoint"] = pin.strip("[]")
+            else:
+                data["pinpoint_type"] = "page"
+                data["pinpoint"] = pin
+        return data
+
+    return None
+
+
+def parse_website_line(raw: str) -> Optional[dict]:
+    # Expected AGLC-ish input:
+    # Author, 'Title' (Site, 1 January 2025) <https://...> accessed 1 Feb 2026.
+    s = raw.strip().rstrip(".")
+    url = None
+    m_url = re.search(r"<(https?://[^>]+)>", s)
+    if m_url:
+        url = m_url.group(1).strip()
+    else:
+        m_url2 = re.search(r"(https?://\S+)", s)
+        if m_url2:
+            url = m_url2.group(1).strip().rstrip(").,")
+    if not url:
+        return None
+
+    m_title = re.search(r"‘([^’]+)’", s)
+    page_title = m_title.group(1).strip() if m_title else ""
+
+    # Author part before first comma
+    author = ""
+    if "," in s:
+        author = s.split(",", 1)[0].strip()
+
+    # Site and date inside parentheses
+    site = ""
+    date = None
+    m_paren = re.search(r"\(([^)]+)\)", s)
+    if m_paren:
+        inside = m_paren.group(1)
+        parts = [p.strip() for p in inside.split(",") if p.strip()]
+        if len(parts) >= 1:
+            site = parts[0]
+        if len(parts) >= 2:
+            date = parts[1]
+
+    access = None
+    m_acc = re.search(r"\baccessed\s+(.+)$", s, re.I)
+    if m_acc:
+        access = m_acc.group(1).strip()
+
+    if not page_title or not site:
+        return None
+
+    return {
+        "author_or_org": author or None,
+        "page_title": page_title,
+        "site_name": site,
+        "date": date,
+        "url": url,
+        "access_date": access,
+    }
 
 
 def make_length_error_entry(idx: int, raw: str, reason: str) -> LexciteEntry:
     return LexciteEntry(
         id=str(idx),
         raw=raw,
-        source_type="OTHER",
-        formatted=raw,
+        source_type="other",
+        formatted_text=raw,
+        formatted_html="",
         validated=False,
         validation_errors=[reason],
         meta={"length_violation": True},
@@ -1240,130 +892,114 @@ def make_length_error_entry(idx: int, raw: str, reason: str) -> LexciteEntry:
 
 @app.post("/lexcite/format", response_model=LexciteResponse)
 def lexcite_format(req: LexciteRequest, request: Request):
-    """
-    Lexcite endpoint.
-    Accepts multiple citations separated by newlines in 'input_text'.
-    Returns structured entries with type, formatted text, validation flags and metadata.
-    Hardened with server side caps and essay detection.
-    """
     api_version = datetime.utcnow().strftime("%Y-%m-%d")
     raw_text = (req.input_text or "").strip()
+    mode = (req.mode or "footnote").strip().lower()
+    if mode not in ("footnote", "bibliography"):
+        mode = "footnote"
 
     if not raw_text:
-        return LexciteResponse(
-            api_version=api_version,
-            entries=[],
-            errors=["No input provided. Paste at least one citation."],
-        )
+        return LexciteResponse(api_version=api_version, entries=[], errors=["No input provided. Paste at least one citation."])
 
     total_chars = len(raw_text)
-
     if total_chars > LEXCITE_MAX_CHARS:
-        msg = (
-            f"Input too long. Lexcite currently supports up to {LEXCITE_MAX_CHARS} "
-            f"characters across all citations. You submitted {total_chars} characters."
-        )
-        log.warning(
-            "Lexcite guardrail: input_too_long chars=%d remote=%s",
-            total_chars,
-            getattr(request.client, "host", "unknown"),
-        )
-        return LexciteResponse(
-            api_version=api_version,
-            entries=[],
-            errors=[msg],
-        )
+        msg = f"Input too long. Lexcite supports up to {LEXCITE_MAX_CHARS} characters. You submitted {total_chars}."
+        return LexciteResponse(api_version=api_version, entries=[], errors=[msg])
 
     lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
     total_lines = len(lines)
 
     if total_lines == 0:
-        return LexciteResponse(
-            api_version=api_version,
-            entries=[],
-            errors=["No usable lines detected. Put one citation per line."],
-        )
+        return LexciteResponse(api_version=api_version, entries=[], errors=["No usable lines detected. Put one citation per line."])
 
     if total_lines > LEXCITE_MAX_LINES:
-        msg = (
-            f"Too many lines. Lexcite currently supports up to {LEXCITE_MAX_LINES} "
-            f"citations per run. You submitted {total_lines} lines."
-        )
-        log.warning(
-            "Lexcite guardrail: too_many_lines lines=%d remote=%s",
-            total_lines,
-            getattr(request.client, "host", "unknown"),
-        )
-        return LexciteResponse(
-            api_version=api_version,
-            entries=[],
-            errors=[msg],
-        )
+        msg = f"Too many lines. Lexcite supports up to {LEXCITE_MAX_LINES} citations per run. You submitted {total_lines}."
+        return LexciteResponse(api_version=api_version, entries=[], errors=[msg])
 
     if total_lines == 1 and looks_like_essay_single_line(lines[0]):
-        msg = (
-            "This looks like paragraph or assignment text, not citations. "
-            "Lexcite expects one citation per line, not full essay text. "
-            "Paste your reference list or individual citations instead."
-        )
-        log.warning(
-            "Lexcite guardrail: essay_detected chars=%d remote=%s",
-            total_chars,
-            getattr(request.client, "host", "unknown"),
-        )
-        return LexciteResponse(
-            api_version=api_version,
-            entries=[],
-            errors=[msg],
-        )
+        msg = "This looks like paragraph or assignment text, not citations. Paste your reference list or individual citations instead."
+        return LexciteResponse(api_version=api_version, entries=[], errors=[msg])
 
     entries: List[LexciteEntry] = []
     errors: List[str] = []
-
-    type_counts: Dict[str, int] = {}
-    length_violations = 0
 
     for idx, line in enumerate(lines, start=1):
         try:
             line_len = len(line)
             if line_len < LEXCITE_MIN_LINE_LEN:
-                reason = (
-                    f"Line {idx} is too short to be a citation (length {line_len}). "
-                    "Please provide a complete citation, not a fragment."
-                )
-                entry = make_length_error_entry(idx, line, reason)
-                entries.append(entry)
-                length_violations += 1
-                type_counts["LENGTH_VIOLATION"] = type_counts.get("LENGTH_VIOLATION", 0) + 1
+                entries.append(make_length_error_entry(idx, line, f"Line {idx} is too short to be a citation."))
                 continue
-
             if line_len > LEXCITE_MAX_LINE_LEN:
-                reason = (
-                    f"Line {idx} is too long to be a single citation (length {line_len}). "
-                    "Lexcite expects one citation per line, not full paragraphs. "
-                    "Split this into separate citations."
-                )
-                entry = make_length_error_entry(idx, line, reason)
-                entries.append(entry)
-                length_violations += 1
-                type_counts["LENGTH_VIOLATION"] = type_counts.get("LENGTH_VIOLATION", 0) + 1
+                entries.append(make_length_error_entry(idx, line, f"Line {idx} is too long to be a single citation. Split it."))
                 continue
 
-            entry = process_lexcite_line(idx, line)
-            entries.append(entry)
-            type_counts[entry.source_type] = type_counts.get(entry.source_type, 0) + 1
+            st = detect_source_type_line(line)
+            data = None
+            parse_meta: Dict[str, Any] = {"detected": st.value}
 
+            if st == SourceType.LEGISLATION:
+                data = parse_legislation_line(line)
+            elif st == SourceType.CASE:
+                data = parse_case_line(line)
+            elif st == SourceType.WEBSITE:
+                data = parse_website_line(line)
+
+            if not data:
+                entries.append(
+                    LexciteEntry(
+                        id=str(idx),
+                        raw=line,
+                        source_type=st.value,
+                        formatted_text=line,
+                        formatted_html="",
+                        validated=False,
+                        validation_errors=["Needs review: could not safely parse this line into structured AGLC fields. Use Build one citation for guaranteed accuracy."],
+                        meta=parse_meta,
+                    )
+                )
+                continue
+
+            # Use the same engine as /cite for true AGLC output (text + html)
+            result = format_citation(source_type=st, data=data, mode=mode)  # may raise
+            entries.append(
+                LexciteEntry(
+                    id=str(idx),
+                    raw=line,
+                    source_type=st.value,
+                    formatted_text=result.text,
+                    formatted_html=result.html,
+                    validated=True,
+                    validation_errors=[],
+                    meta=parse_meta,
+                )
+            )
+
+        except ValidationError as ve:
+            entries.append(
+                LexciteEntry(
+                    id=str(idx),
+                    raw=line,
+                    source_type="other",
+                    formatted_text=line,
+                    formatted_html="",
+                    validated=False,
+                    validation_errors=["Needs review: validation failed for this line. Use Build one citation."] + [str(x.get("msg", "")) for x in ve.errors()],
+                    meta={},
+                )
+            )
         except Exception as e:
             log.exception("Lexcite processing failed for line %d: %s", idx, line)
-            errors.append(f"Error processing line {idx}: {e}")
-
-    log.info(
-        "Lexcite request summary chars=%d lines=%d types=%s length_violations=%d remote=%s",
-        total_chars,
-        total_lines,
-        type_counts,
-        length_violations,
-        getattr(request.client, "host", "unknown"),
-    )
+            entries.append(
+                LexciteEntry(
+                    id=str(idx),
+                    raw=line,
+                    source_type="other",
+                    formatted_text=line,
+                    formatted_html="",
+                    validated=False,
+                    validation_errors=[f"Needs review: {e}"],
+                    meta={},
+                )
+            )
 
     return LexciteResponse(api_version=api_version, entries=entries, errors=errors)
