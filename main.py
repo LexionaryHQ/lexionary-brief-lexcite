@@ -1,44 +1,41 @@
 # main.py - Lexionary v3 Brief API + Lexcite AGLC Engine
-# Version: 1.6.2
-# - Keeps existing /brief IRAC endpoint.
-# - Adds explicit `text` field support for direct case extracts.
-# - Direct text fallback now works for long pasted text when verification fails.
-# - Hardened /lexcite/format as before.
+# Version: 1.7.0
+# - Keeps existing /brief IRAC endpoint behaviour.
+# - Adds robust, frontend-friendly /cite endpoint with consistent JSON errors.
+# - Keeps existing /lexcite/format hardening.
 # Run: uvicorn main:app --host 0.0.0.0 --port 8000
 
 import os, re, time, logging, urllib.parse, random, json
 from datetime import datetime
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Tuple, Union
 
 import requests
 from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field
+from pydantic import ValidationError
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
 from aglc_engine import format_citation, SourceType
-from pydantic import ValidationError
 
 # ---------------------------------------------------------------------------
 # Helper to pull out neutral citation from a longer string
 # ---------------------------------------------------------------------------
 
-def extract_neutral_citation(user_input: str) -> str | None:
+def extract_neutral_citation(user_input: str) -> Optional[str]:
     """
     Extracts a neutral citation like:
       [2025] NSWCA 243
       [1992] HCA 23
       [2010] FCAFC 75
-
     from any longer string that may also contain party names or extra text.
     """
     if not user_input:
         return None
 
     text = " ".join(user_input.split())  # normalise whitespace
-
-    # Pattern:
-    # [year]  court-code  number
-    # Court code is one or more non-space chars (NSWCA, HCA, FCAFC, VSC etc)
     pattern = r"\[\d{4}\]\s+\S+\s+\d+"
 
     match = re.search(pattern, text)
@@ -46,6 +43,7 @@ def extract_neutral_citation(user_input: str) -> str | None:
         return match.group(0).strip()
 
     return None
+
 
 # ---- Optional PDF extraction support
 HAS_PDFMINER = False
@@ -59,6 +57,7 @@ except Exception:
         HAS_PDFMINER = True
     except Exception:
         pdf_extract_text = None  # type: ignore
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("lexionary")
@@ -121,7 +120,7 @@ class _OpenAIShim:
 _openai = _OpenAIShim()
 
 # ---------------- FastAPI + CORS ----------------
-app = FastAPI(title="Lexionary v3 - Brief API + Lexcite", version="1.6.2")
+app = FastAPI(title="Lexionary v3 - Brief API + Lexcite", version="1.7.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -131,6 +130,7 @@ app.add_middleware(
 )
 
 # ---------------- Models ----------------
+
 class BriefRequest(BaseModel):
     query: Optional[str] = Field(None, description="Case name or neutral citation or direct text")
     url: Optional[str] = Field(None, description="AustLII judgment URL")
@@ -167,10 +167,23 @@ class LexciteResponse(BaseModel):
     entries: List[LexciteEntry]
     errors: List[str] = Field(default_factory=list)
 
+
+# /cite models (frontend-friendly)
 class CitationRequest(BaseModel):
-    source_type: SourceType | str
+    source_type: Union[SourceType, str]
     data: dict
     mode: str = "footnote"
+
+
+class CitationResponse(BaseModel):
+    success: bool
+    source_type: str
+    mode: str
+    text: str
+    html: str
+    error: Optional[str] = None
+    messages: List[dict] = Field(default_factory=list)
+
 
 # ---------------- AustLII constants ----------------
 AUSTLII_BASE = "https://www.austlii.edu.au"
@@ -182,7 +195,7 @@ AUSTLII_MIRRORS = [
     "https://www7.austlii.edu.au",
 ]
 AUSTLII_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; Lexionary/1.4.2; +https://lexionary.com.au)",
+    "User-Agent": "Mozilla/5.0 (compatible; Lexionary/1.7.0; +https://lexionary.com.au)",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-AU,en;q=0.9",
     "Connection": "keep-alive",
@@ -383,13 +396,11 @@ def resolve_or_search_case_url(query: Optional[str], url: Optional[str]) -> Tupl
         if looks_like_judgment_url(url):
             return url, "direct"
         if "austlii.edu.au" in (url or ""):
-            # Looks like AustLII but not a recognised judgment pattern
             return None, "invalid-direct"
         raise HTTPException(status_code=400, detail="Only direct AustLII judgment URLs supported in 'url'.")
 
     # 2. Query - neutral citation or case name
     if query:
-        # Try to pull out a neutral citation embedded in the text if present
         neutral = extract_neutral_citation(query) or query
         c = resolve_from_citation(neutral)
         if c:
@@ -403,7 +414,7 @@ def resolve_or_search_case_url(query: Optional[str], url: Optional[str]) -> Tupl
 
 # ---------------- High Court fallback (optional) ----------------
 HCA_PDF_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; Lexionary/1.4.2; +https://lexionary.com.au)",
+    "User-Agent": "Mozilla/5.0 (compatible; Lexionary/1.7.0; +https://lexionary.com.au)",
     "Accept": "application/pdf,*/*",
     "Referer": "https://www.hcourt.gov.au/",
 }
@@ -583,8 +594,8 @@ def root():
     return {
         "ok": True,
         "service": "Lexionary v3 - Brief API + Lexcite",
-        "endpoints": ["/health", "/brief", "/lexcite/format"],
-        "version": "1.6.2",
+        "endpoints": ["/health", "/brief", "/lexcite/format", "/cite"],
+        "version": "1.7.0",
         "has_pdfminer": HAS_PDFMINER,
     }
 
@@ -734,40 +745,72 @@ def brief(req: BriefRequest, request: Request):
     }
     return BriefResponse(success=True, brief=brief_text, meta=meta)
 
-@app.post("/cite")
+
+# ---------------- /cite (updated, consistent errors) ----------------
+@app.post("/cite", response_model=CitationResponse)
 async def cite(req: CitationRequest):
+    """
+    Deterministic formatting endpoint used by the structured builder UI.
+    Always returns a JSON body with:
+      success: true/false
+      error/messages when false
+
+    This avoids FastAPI's nested HTTPException detail structures that are awkward in frontend JS.
+    """
     try:
         result = format_citation(
             source_type=req.source_type,
             data=req.data,
             mode=req.mode,
         )
-        return {
-            "success": True,
-            "source_type": result.source_type.value,
-            "mode": result.mode,
-            "text": result.text,
-            "html": result.html,
-        }
+        return CitationResponse(
+            success=True,
+            source_type=result.source_type.value,
+            mode=result.mode,
+            text=result.text,
+            html=result.html,
+        )
     except ValidationError as ve:
-        # Input did not match the model for that source type
-        raise HTTPException(
+        return JSONResponse(
             status_code=400,
-            detail={
-                "success": False,
-                "error": "validation_error",
-                "messages": ve.errors(),
-            },
+            content=CitationResponse(
+                success=False,
+                source_type=str(req.source_type),
+                mode=req.mode,
+                text="",
+                html="",
+                error="validation_error",
+                messages=ve.errors(),
+            ).model_dump(),
+        )
+    except ValueError as e:
+        return JSONResponse(
+            status_code=400,
+            content=CitationResponse(
+                success=False,
+                source_type=str(req.source_type),
+                mode=req.mode,
+                text="",
+                html="",
+                error="validation_error",
+                messages=[{"msg": str(e)}],
+            ).model_dump(),
         )
     except Exception as e:
-        raise HTTPException(
+        log.exception("Cite failed: %s", e)
+        return JSONResponse(
             status_code=500,
-            detail={
-                "success": False,
-                "error": "server_error",
-                "message": str(e),
-            },
+            content=CitationResponse(
+                success=False,
+                source_type=str(req.source_type),
+                mode=req.mode,
+                text="",
+                html="",
+                error="server_error",
+                messages=[{"msg": str(e)}],
+            ).model_dump(),
         )
+
 
 # -------------------------------------------------------------------------
 # LEXCITE ENGINE (AGLC DETECTION + METADATA + WEBSITE SUPPORT)
@@ -851,12 +894,10 @@ def extract_legislation_metadata_simple(raw: str) -> Dict[str, Any]:
     meta: Dict[str, Any] = {}
     s = raw.strip()
 
-    # First try "Title Year (Jur) Provision?" pattern, with mixed case jurisdiction
     m = re.search(
         r"^(?P<title>.+?)\s+(?P<year>\d{4})\s*\(\s*(?P<jurisdiction>[A-Za-z]{2,6})\s*\)\s*(?P<provision>.+)?$",
         s,
     )
-    # Fallback: "Title Year Jur Provision?" without brackets, eg: "Fair Work Act 2009 Cth s 123"
     if not m:
         m = re.search(
             r"^(?P<title>.+?)\s+(?P<year>\d{4})\s+(?P<jurisdiction>[A-Za-z]{2,6})\s*(?P<provision>.+)?$",
@@ -871,7 +912,6 @@ def extract_legislation_metadata_simple(raw: str) -> Dict[str, Any]:
 
         meta["title"] = title
         meta["year"] = year
-        # Preserve the raw form students actually use (Cth, NSW, Vic, etc)
         meta["jurisdiction"] = jurisdiction_raw
         if provision:
             meta["provision"] = provision.strip()
@@ -926,7 +966,6 @@ def format_today_aus() -> str:
     try:
         return today.strftime("%-d %B %Y")
     except Exception:
-        # Windows style fallback: remove leading zero
         return today.strftime("%d %B %Y").lstrip("0")
 
 
@@ -940,7 +979,6 @@ def extract_website_metadata_llm(raw: str) -> Dict[str, Any]:
     if not text:
         return base
 
-    # Try to find a URL directly in the text as a fallback.
     url_match = re.search(r"<(https?://[^>]+)>", text)
     if not url_match:
         url_match = re.search(r"(https?://\S+)", text)
@@ -990,13 +1028,11 @@ Return JSON:
     except Exception as e:
         log.warning("LLM website metadata extraction failed: %s", e)
 
-    # Normalise confidence
     try:
         base["confidence"] = float(base.get("confidence", 0.0))
     except Exception:
         base["confidence"] = 0.0
 
-    # If LLM forgot URL but we had a regex match, preserve that
     if not base.get("url") and url_match:
         base["url"] = url_match.group(1)
 
@@ -1148,9 +1184,7 @@ def process_lexcite_line(idx: int, raw: str) -> LexciteEntry:
     else:
         formatted = raw
         validated = False
-        validation_errors.append(
-            "Unsupported source type for automatic formatting in this version."
-        )
+        validation_errors.append("Unsupported source type for automatic formatting in this version.")
         meta = {}
 
     return LexciteEntry(
@@ -1181,15 +1215,7 @@ def looks_like_essay_single_line(text: str) -> bool:
         return False
 
     lower = text.lower()
-
-    citation_signals = [
-        " v ",
-        " v. ",
-        " act ",
-        " regulation",
-        "<http",
-        "<https",
-    ]
+    citation_signals = [" v ", " v. ", " act ", " regulation", "<http", "<https"]
     year_pattern = re.search(r"\(\d{4}\)", text) or re.search(r"\[\d{4}\]", text)
 
     if any(sig in lower for sig in citation_signals):
