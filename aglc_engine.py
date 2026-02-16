@@ -1,71 +1,104 @@
 # aglc_engine.py
-# Lexionary Lexcite AGLC4 engine (pragmatic, accuracy-first)
-# Produces both plain text and safe HTML (italics via <i>).
+# Lexionary Lexcite AGLC4 Engine
 # Version: 2.0.0
+# Outputs both plain text and HTML (italics via <i> only).
+# Focus: AU law students, accuracy-first formatting, strict validation.
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 from enum import Enum
-from html import escape as html_escape
-from typing import List, Optional, Literal, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 
 class SourceType(str, Enum):
-    CASE = "case"
-    LEGISLATION = "legislation"
-    JOURNAL_ARTICLE = "journal_article"
-    BOOK = "book"
-    BOOK_CHAPTER = "book_chapter"
-    MEDIA_ARTICLE = "media_article"
-    REPORT = "report"
-    WEBSITE = "website"
-
-
-Mode = Literal["footnote", "bibliography"]
+    case = "case"
+    legislation = "legislation"
+    journal_article = "journal_article"
+    book = "book"
+    book_chapter = "book_chapter"
+    media_article = "media_article"
+    report = "report"
+    website = "website"
 
 
 @dataclass
 class CitationResult:
     source_type: SourceType
-    mode: Mode
+    mode: str
     text: str
     html: str
 
 
-# -------------------------
+# ---------------------------
 # Helpers
-# -------------------------
+# ---------------------------
 
-def _clean(s: Optional[str]) -> str:
-    return (s or "").strip()
-
-
-def _end_full_stop(s: str) -> str:
-    s = s.strip()
-    if not s:
-        return s
-    return s if s.endswith(".") else s + "."
+def _clean_spaces(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip())
 
 
-def _italics_html(s: str) -> str:
-    s = s.strip()
-    if not s:
-        return s
-    return f"<i>{html_escape(s)}</i>"
+def _escape_html(s: str) -> str:
+    # Strict escaping, then we will only inject <i> where we intend.
+    return (
+        (s or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
 
 
-def _plain(s: str) -> str:
-    return html_escape(s)
+def _italics_text(text: str) -> Tuple[str, str]:
+    """
+    Returns (plain_text, html_text) where html has italicised version of `text`.
+    """
+    t = _clean_spaces(text)
+    return t, f"<i>{_escape_html(t)}</i>"
 
 
-def _join_authors_footnote(authors: List[str]) -> str:
-    a = [x.strip() for x in authors if x and x.strip()]
+def _fmt_pinpoint(pinpoint_type: Optional[str], pinpoint: Optional[str]) -> str:
+    pt = (pinpoint_type or "").strip().lower()
+    pv = (pinpoint or "").strip()
+
+    if not pt or not pv:
+        return ""
+
+    if pt == "page":
+        # AGLC: reported cases pinpoint with comma then page number
+        return f", {pv}"
+    if pt == "paragraph":
+        # AGLC: neutral citations use [para]
+        # If user gives "150" turn into "[150]"
+        if re.fullmatch(r"\[\d+\]", pv):
+            return f", {pv}"
+        if re.fullmatch(r"\d+", pv):
+            return f", [{pv}]"
+        # If they typed something odd, still show it but bracket if it looks numeric-ish
+        return f", [{pv}]"
+
+    return f", {pv}"
+
+
+def _join_authors(authors: List[str], mode: str) -> str:
+    a = [_clean_spaces(x) for x in (authors or []) if _clean_spaces(x)]
     if not a:
         return ""
+
+    if mode == "bibliography":
+        # Very simple inversion: "Jane Smith" -> "Smith, Jane"
+        inv: List[str] = []
+        for name in a:
+            parts = name.split()
+            if len(parts) >= 2:
+                inv.append(f"{parts[-1]}, {' '.join(parts[:-1])}")
+            else:
+                inv.append(name)
+        a = inv
+
     if len(a) == 1:
         return a[0]
     if len(a) == 2:
@@ -73,151 +106,98 @@ def _join_authors_footnote(authors: List[str]) -> str:
     return ", ".join(a[:-1]) + f", and {a[-1]}"
 
 
-def _invert_name(name: str) -> str:
-    name = name.strip()
-    if not name:
-        return ""
-    parts = name.split()
-    if len(parts) == 1:
-        return name
-    return f"{parts[-1]}, {' '.join(parts[:-1])}"
+def _ensure_ends_with_period(s: str) -> str:
+    s = _clean_spaces(s)
+    if not s:
+        return s
+    if s.endswith("."):
+        return s
+    return s + "."
 
 
-def _join_authors_bibliography(authors: List[str]) -> str:
-    a = [x.strip() for x in authors if x and x.strip()]
-    if not a:
-        return ""
-    inv = [_invert_name(x) for x in a]
-    if len(inv) == 1:
-        return inv[0]
-    if len(inv) == 2:
-        return f"{inv[0]} and {inv[1]}"
-    return ", ".join(inv[:-1]) + f", and {inv[-1]}"
-
-
-def _maybe_brackets_year(year: str, in_square: bool) -> str:
-    y = year.strip()
-    if not y:
-        return ""
-    return f"[{y}]" if in_square else f"({y})"
-
-
-def _pinpoint_suffix(pinpoint_type: Optional[str], pinpoint: Optional[str]) -> str:
-    pt = _clean(pinpoint_type).lower()
-    pv = _clean(pinpoint)
-    if not pt or not pv:
-        return ""
-    if pt == "paragraph":
-        # AGLC paragraphs are [123]
-        pv2 = pv.strip("[]").strip()
-        return f" [{pv2}]"
-    if pt == "page":
-        # page pinpoints are just page number
-        return f" {pv}"
-    return ""
-
-
-def _s_or_ss(unit: str) -> str:
-    u = unit.strip().lower()
-    if u in ("s", "sec", "section"):
-        return "s"
-    if u in ("ss", "secs", "sections"):
-        return "ss"
-    return unit.strip()  # allow custom
-
-
-# -------------------------
+# ---------------------------
 # Models
-# -------------------------
+# ---------------------------
 
-class CaseData(BaseModel):
-    case_name: str = Field(..., min_length=2)
-    year: Optional[str] = Field(None)
-    reporter_series_by_year: bool = False
-    volume: Optional[str] = None
-    reporter: Optional[str] = None
-    first_page: Optional[str] = None
+class CaseCitation(BaseModel):
+    case_name: str = Field(..., description="Case name, eg Mabo v Queensland (No 2)")
+    year: str = Field(..., description="Decision year, eg 1992")
+    # Reported (optional)
+    reporter_series_by_year: bool = Field(False)
+    volume: Optional[str] = Field(None)
+    reporter: Optional[str] = Field(None)
+    first_page: Optional[str] = Field(None)
 
-    court: Optional[str] = None
-    decision_number: Optional[str] = None
+    # Neutral (optional)
+    court: Optional[str] = Field(None, description="Court code, eg HCA, NSWCA")
+    decision_number: Optional[str] = Field(None, description="Neutral decision number, eg 23")
 
-    neutral_citation_first: bool = True
-    unreported: bool = False
+    neutral_citation_first: bool = Field(True)
+    unreported: bool = Field(False)
 
-    pinpoint_type: Optional[Literal["page", "paragraph"]] = None
-    pinpoint: Optional[str] = None
-
-    @field_validator("year")
-    @classmethod
-    def _year_ok(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
-            return v
-        v = v.strip()
-        if not v:
-            return None
-        if not re.fullmatch(r"\d{4}", v):
-            raise ValueError("year must be YYYY")
-        return v
-
-    @field_validator("volume", "first_page", "decision_number")
-    @classmethod
-    def _digits_ok(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
-            return v
-        v = v.strip()
-        if not v:
-            return None
-        if not re.fullmatch(r"\d{1,5}", v):
-            raise ValueError("must be numeric")
-        return v
-
-    @field_validator("court", "reporter")
-    @classmethod
-    def _upperish(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
-            return v
-        v = v.strip()
-        if not v:
-            return None
-        return v
-
-
-class LegislationData(BaseModel):
-    title: str = Field(..., min_length=2)
-    year: str = Field(..., min_length=4)
-    jurisdiction: str = Field(..., min_length=2)
-    is_bill: bool = False
-    pinpoint_unit: Optional[str] = None
-    pinpoint_number: Optional[str] = None
+    pinpoint_type: Optional[str] = Field(None, description="page or paragraph")
+    pinpoint: Optional[str] = Field(None)
 
     @field_validator("year")
     @classmethod
     def _year_ok(cls, v: str) -> str:
-        v = v.strip()
+        v = _clean_spaces(v)
         if not re.fullmatch(r"\d{4}", v):
-            raise ValueError("year must be YYYY")
+            raise ValueError("Year must be a 4 digit year.")
+        return v
+
+    @field_validator("case_name")
+    @classmethod
+    def _case_ok(cls, v: str) -> str:
+        v = _clean_spaces(v)
+        if len(v) < 3:
+            raise ValueError("Case name is required.")
+        return v
+
+
+class LegislationCitation(BaseModel):
+    title: str
+    year: str
+    jurisdiction: str
+    is_bill: bool = False
+    pinpoint_unit: Optional[str] = None  # s or ss
+    pinpoint_number: Optional[str] = None  # 5B, 12(1), etc
+
+    @field_validator("year")
+    @classmethod
+    def _year_ok(cls, v: str) -> str:
+        v = _clean_spaces(v)
+        if not re.fullmatch(r"\d{4}", v):
+            raise ValueError("Year must be a 4 digit year.")
+        return v
+
+    @field_validator("title")
+    @classmethod
+    def _title_ok(cls, v: str) -> str:
+        v = _clean_spaces(v)
+        if len(v) < 3:
+            raise ValueError("Title is required.")
         return v
 
     @field_validator("jurisdiction")
     @classmethod
     def _jur_ok(cls, v: str) -> str:
-        v = v.strip()
+        v = _clean_spaces(v)
         if len(v) < 2:
-            raise ValueError("jurisdiction required")
+            raise ValueError("Jurisdiction is required, eg Cth, NSW.")
         return v
 
 
-class JournalArticleData(BaseModel):
-    authors: List[str] = Field(default_factory=list)
-    article_title: str = Field(..., min_length=2)
-    year: str = Field(..., min_length=4)
+class JournalArticleCitation(BaseModel):
+    authors: List[str]
+    article_title: str
+    year: str
     year_in_square_brackets: bool = False
     volume: Optional[str] = None
     issue: Optional[str] = None
-    journal_title: str = Field(..., min_length=2)
-    starting_page: str = Field(..., min_length=1)
+    journal_title: str
+    starting_page: str
     pinpoint: Optional[str] = None
-
     is_online: bool = False
     url: Optional[str] = None
     access_date: Optional[str] = None
@@ -225,36 +205,36 @@ class JournalArticleData(BaseModel):
     @field_validator("year")
     @classmethod
     def _year_ok(cls, v: str) -> str:
-        v = v.strip()
+        v = _clean_spaces(v)
         if not re.fullmatch(r"\d{4}", v):
-            raise ValueError("year must be YYYY")
+            raise ValueError("Year must be a 4 digit year.")
         return v
 
 
-class BookData(BaseModel):
-    authors: List[str] = Field(default_factory=list)
-    title: str = Field(..., min_length=2)
-    publisher: str = Field(..., min_length=2)
-    year: str = Field(..., min_length=4)
+class BookCitation(BaseModel):
+    authors: List[str]
+    title: str
+    publisher: str
+    year: str
     edition: Optional[str] = None
     pinpoint: Optional[str] = None
 
     @field_validator("year")
     @classmethod
     def _year_ok(cls, v: str) -> str:
-        v = v.strip()
+        v = _clean_spaces(v)
         if not re.fullmatch(r"\d{4}", v):
-            raise ValueError("year must be YYYY")
+            raise ValueError("Year must be a 4 digit year.")
         return v
 
 
-class BookChapterData(BaseModel):
-    chapter_authors: List[str] = Field(default_factory=list)
-    chapter_title: str = Field(..., min_length=2)
-    editors: List[str] = Field(default_factory=list)
-    book_title: str = Field(..., min_length=2)
-    publisher: str = Field(..., min_length=2)
-    year: str = Field(..., min_length=4)
+class BookChapterCitation(BaseModel):
+    chapter_authors: List[str]
+    chapter_title: str
+    editors: List[str]
+    book_title: str
+    publisher: str
+    year: str
     edition: Optional[str] = None
     starting_page: Optional[str] = None
     pinpoint: Optional[str] = None
@@ -262,332 +242,376 @@ class BookChapterData(BaseModel):
     @field_validator("year")
     @classmethod
     def _year_ok(cls, v: str) -> str:
-        v = v.strip()
+        v = _clean_spaces(v)
         if not re.fullmatch(r"\d{4}", v):
-            raise ValueError("year must be YYYY")
+            raise ValueError("Year must be a 4 digit year.")
         return v
 
 
-class MediaArticleData(BaseModel):
+class MediaArticleCitation(BaseModel):
     authors: List[str] = Field(default_factory=list)
     org_as_author: Optional[str] = None
-    article_title: str = Field(..., min_length=2)
-    newspaper_title: str = Field(..., min_length=2)
+    article_title: str
+    newspaper_title: str
     city: Optional[str] = None
-    date: str = Field(..., min_length=4)  # keep flexible: "1 January 2025"
+    date: str
     page: Optional[str] = None
-
     is_online: bool = False
     url: Optional[str] = None
     access_date: Optional[str] = None
 
 
-class ReportData(BaseModel):
-    author_or_org: str = Field(..., min_length=2)
-    title: str = Field(..., min_length=2)
+class ReportCitation(BaseModel):
+    author_or_org: str
+    title: str
     report_number_or_series: Optional[str] = None
     publisher: Optional[str] = None
     place: Optional[str] = None
     date: Optional[str] = None
     pinpoint: Optional[str] = None
-
     is_online: bool = False
     url: Optional[str] = None
     access_date: Optional[str] = None
 
 
-class WebsiteData(BaseModel):
+class WebsiteCitation(BaseModel):
     author_or_org: Optional[str] = None
-    page_title: str = Field(..., min_length=2)
-    site_name: str = Field(..., min_length=2)
+    page_title: str
+    site_name: str
     date: Optional[str] = None
-    url: str = Field(..., min_length=6)
+    url: str
     access_date: Optional[str] = None
 
 
-DataUnion = Union[
-    CaseData,
-    LegislationData,
-    JournalArticleData,
-    BookData,
-    BookChapterData,
-    MediaArticleData,
-    ReportData,
-    WebsiteData,
-]
-
-
-def _validate_data(source_type: SourceType, data: dict) -> DataUnion:
-    if source_type == SourceType.CASE:
-        return CaseData(**data)
-    if source_type == SourceType.LEGISLATION:
-        return LegislationData(**data)
-    if source_type == SourceType.JOURNAL_ARTICLE:
-        return JournalArticleData(**data)
-    if source_type == SourceType.BOOK:
-        return BookData(**data)
-    if source_type == SourceType.BOOK_CHAPTER:
-        return BookChapterData(**data)
-    if source_type == SourceType.MEDIA_ARTICLE:
-        return MediaArticleData(**data)
-    if source_type == SourceType.REPORT:
-        return ReportData(**data)
-    if source_type == SourceType.WEBSITE:
-        return WebsiteData(**data)
-    raise ValueError("unsupported source_type")
-
-
-# -------------------------
+# ---------------------------
 # Formatters
-# -------------------------
+# ---------------------------
 
-def _format_case(d: CaseData, mode: Mode) -> CitationResult:
-    case_name_txt = d.case_name.strip()
-    case_name_html = _italics_html(case_name_txt)
+def _format_case(data: CaseCitation, mode: str) -> CitationResult:
+    case_name_plain, case_name_html = _italics_text(data.case_name)
 
+    # Neutral citation if possible
     neutral = ""
-    if d.year and d.court and d.decision_number:
-        neutral = f"[{d.year}] {d.court.strip()} {d.decision_number.strip()}"
+    if data.court and data.decision_number:
+        neutral = f"[{data.year}] {data.court} {data.decision_number}"
 
+    # Reported citation if possible
     reported = ""
-    if d.year and d.volume and d.reporter and d.first_page:
-        # reported year in () or []
-        y = _maybe_brackets_year(d.year, d.reporter_series_by_year)
-        reported = f"{y} {d.volume.strip()} {d.reporter.strip()} {d.first_page.strip()}"
+    if data.volume and data.reporter and data.first_page:
+        if data.reporter_series_by_year:
+            reported = f"[{data.year}] {data.volume} {data.reporter} {data.first_page}"
+        else:
+            reported = f"({data.year}) {data.volume} {data.reporter} {data.first_page}"
 
-    if d.unreported and not neutral:
-        raise ValueError("Unreported case requires neutral citation (year, court, decision number).")
+    # Validation logic:
+    # AGLC4: case must have either (a) a reported citation OR (b) a neutral citation for unreported cases.
+    if data.unreported and not neutral:
+        raise ValueError("Unreported case requires a neutral citation (court and decision number).")
 
     if not neutral and not reported:
-        raise ValueError("Provide either a neutral citation (year, court, decision number) or a reported citation.")
+        raise ValueError("Provide either a reported citation (volume, reporter, first page) or a neutral citation (court and decision number).")
 
-    pin = _pinpoint_suffix(d.pinpoint_type, d.pinpoint)
+    pin = _fmt_pinpoint(data.pinpoint_type, data.pinpoint)
 
-    pieces_txt: List[str] = []
-    pieces_html: List[str] = []
-
-    # AGLC: case name italicised, citations not italicised
     if neutral and reported:
-        if d.neutral_citation_first:
-            pieces_txt = [f"{case_name_txt} {neutral}", reported]
-            pieces_html = [f"{case_name_html} {_plain(' ' + neutral).strip()}", _plain(reported)]
+        if data.neutral_citation_first:
+            text = f"{case_name_plain} {neutral}; {reported}{pin}"
+            html = f"{case_name_html} {_escape_html(neutral)}; {_escape_html(reported)}{_escape_html(pin)}"
         else:
-            pieces_txt = [f"{case_name_txt} {reported}", neutral]
-            pieces_html = [f"{case_name_html} {_plain(' ' + reported).strip()}", _plain(neutral)]
+            text = f"{case_name_plain} {reported}; {neutral}{pin}"
+            html = f"{case_name_html} {_escape_html(reported)}; {_escape_html(neutral)}{_escape_html(pin)}"
     elif neutral:
-        pieces_txt = [f"{case_name_txt} {neutral}"]
-        pieces_html = [f"{case_name_html} {_plain(' ' + neutral).strip()}"]
+        text = f"{case_name_plain} {neutral}{pin}"
+        html = f"{case_name_html} {_escape_html(neutral)}{_escape_html(pin)}"
     else:
-        pieces_txt = [f"{case_name_txt} {reported}"]
-        pieces_html = [f"{case_name_html} {_plain(' ' + reported).strip()}"]
+        text = f"{case_name_plain} {reported}{pin}"
+        html = f"{case_name_html} {_escape_html(reported)}{_escape_html(pin)}"
 
-    out_txt = ", ".join(pieces_txt) + pin
-    out_html = ", ".join(pieces_html) + _plain(pin)
-
-    return CitationResult(SourceType.CASE, mode, _end_full_stop(out_txt), _end_full_stop(out_html))
+    return CitationResult(source_type=SourceType.case, mode=mode, text=_ensure_ends_with_period(text), html=_ensure_ends_with_period(html))
 
 
-def _format_legislation(d: LegislationData, mode: Mode) -> CitationResult:
-    title = d.title.strip()
-    year = d.year.strip()
-    jur = d.jurisdiction.strip()
-    bill = " Bill" if d.is_bill else " Act"
-    # Users often enter "Fair Work Act" already. Do not double "Act".
-    if re.search(r"\b(Act|Bill|Regulations?)\b", title):
-        base = f"{title} {year} ({jur})"
-    else:
-        base = f"{title}{bill} {year} ({jur})"
+def _format_legislation(data: LegislationCitation, mode: str) -> CitationResult:
+    title = _clean_spaces(data.title)
+    yr = data.year
+    jur = _clean_spaces(data.jurisdiction)
+    kind = "Bill" if data.is_bill else "Act"
 
-    suffix = ""
-    if _clean(d.pinpoint_unit) and _clean(d.pinpoint_number):
-        suffix = f" {_s_or_ss(d.pinpoint_unit)} {d.pinpoint_number.strip()}"
+    base = f"{title} {yr} ({jur})"
+    if data.is_bill:
+        # If user wrote "Fair Work Bill", still prefer their title, but show "(Bill)"
+        base = f"{title} {yr} ({jur}) ({kind})"
 
-    txt = _end_full_stop(base + suffix)
-    html = _end_full_stop(_plain(base + suffix))
-    return CitationResult(SourceType.LEGISLATION, mode, txt, html)
+    if data.pinpoint_unit and data.pinpoint_number:
+        base += f" {data.pinpoint_unit} {data.pinpoint_number}"
+
+    text = _ensure_ends_with_period(base)
+    html = _ensure_ends_with_period(_escape_html(base))
+    return CitationResult(source_type=SourceType.legislation, mode=mode, text=text, html=html)
 
 
-def _format_journal(d: JournalArticleData, mode: Mode) -> CitationResult:
-    authors_txt = _join_authors_bibliography(d.authors) if mode == "bibliography" else _join_authors_footnote(d.authors)
-    if not authors_txt:
-        raise ValueError("Journal article requires at least one author.")
+def _format_journal(data: JournalArticleCitation, mode: str) -> CitationResult:
+    authors = _join_authors(data.authors, mode)
+    if not authors:
+        raise ValueError("Author(s) required for journal articles.")
 
-    year_part = _maybe_brackets_year(d.year, d.year_in_square_brackets)
+    article_title = _clean_spaces(data.article_title)
+    journal_plain, journal_html = _italics_text(data.journal_title)
+
+    year_wrap = f"[{data.year}]" if data.year_in_square_brackets else f"({data.year})"
 
     vol_issue = ""
-    if _clean(d.volume) and _clean(d.issue):
-        vol_issue = f"{d.volume.strip()}({d.issue.strip()})"
-    elif _clean(d.volume):
-        vol_issue = d.volume.strip()
+    if data.volume:
+        vol_issue = f"{data.volume}"
+        if data.issue:
+            vol_issue += f"({data.issue})"
 
-    journal_txt = d.journal_title.strip()
-    journal_html = _italics_html(journal_txt)
+    start = _clean_spaces(data.starting_page)
+    pin = f", {data.pinpoint}" if data.pinpoint else ""
 
-    base_txt = f"{authors_txt}, '{d.article_title.strip()}' {year_part}"
-    base_html = f"{_plain(authors_txt)}, '{_plain(d.article_title.strip())}' {_plain(year_part)}"
+    core = f"{authors}, '{article_title}' {year_wrap}"
+    if vol_issue:
+        core += f" {vol_issue}"
+    core += f" {journal_plain} {start}{pin}"
 
-    mid_txt = f"{vol_issue} {journal_txt} {d.starting_page.strip()}".strip()
-    mid_html = f"{_plain(vol_issue + ' ').strip()}{journal_html} {_plain(' ' + d.starting_page.strip()).strip()}".strip()
+    text = _ensure_ends_with_period(core)
 
-    pin = f" {_clean(d.pinpoint)}" if _clean(d.pinpoint) else ""
+    html = f"{_escape_html(authors)}, '{_escape_html(article_title)}' {_escape_html(year_wrap)}"
+    if vol_issue:
+        html += f" {_escape_html(vol_issue)}"
+    html += f" {journal_html} {_escape_html(start)}{_escape_html(pin)}"
+    html = _ensure_ends_with_period(html)
 
-    txt = _end_full_stop(f"{base_txt} {mid_txt}{pin}".strip())
-    html = _end_full_stop(f"{base_html} {mid_html}{_plain(pin)}".strip())
-    return CitationResult(SourceType.JOURNAL_ARTICLE, mode, txt, html)
+    # Online add-ons (minimal)
+    if data.is_online:
+        if not data.url or not data.access_date:
+            raise ValueError("Online journal articles require URL and access date.")
+        text = text[:-1] + f" <{data.url}> accessed {data.access_date}."
+        html = html[:-1] + f" &lt;{_escape_html(data.url)}&gt; accessed {_escape_html(data.access_date)}."
 
-
-def _format_book(d: BookData, mode: Mode) -> CitationResult:
-    authors_txt = _join_authors_bibliography(d.authors) if mode == "bibliography" else _join_authors_footnote(d.authors)
-    if not authors_txt:
-        raise ValueError("Book requires at least one author.")
-
-    title_txt = d.title.strip()
-    title_html = _italics_html(title_txt)
-
-    inside_bits = [d.publisher.strip()]
-    if _clean(d.edition):
-        inside_bits.append(d.edition.strip())
-    inside_bits.append(d.year.strip())
-    inside = ", ".join(inside_bits)
-
-    pin = f" {_clean(d.pinpoint)}" if _clean(d.pinpoint) else ""
-
-    txt = _end_full_stop(f"{authors_txt}, {title_txt} ({inside}){pin}")
-    html = _end_full_stop(f"{_plain(authors_txt)}, {title_html} ({_plain(inside)}){_plain(pin)}")
-    return CitationResult(SourceType.BOOK, mode, txt, html)
+    return CitationResult(source_type=SourceType.journal_article, mode=mode, text=text, html=html)
 
 
-def _format_book_chapter(d: BookChapterData, mode: Mode) -> CitationResult:
-    ca_txt = _join_authors_bibliography(d.chapter_authors) if mode == "bibliography" else _join_authors_footnote(d.chapter_authors)
-    if not ca_txt:
-        raise ValueError("Book chapter requires at least one chapter author.")
+def _format_book(data: BookCitation, mode: str) -> CitationResult:
+    authors = _join_authors(data.authors, mode)
+    if not authors:
+        raise ValueError("Author(s) required for books.")
 
-    ed_txt = _join_authors_footnote(d.editors)
-    if not ed_txt:
-        raise ValueError("Book chapter requires editor(s).")
+    title_plain, title_html = _italics_text(data.title)
+    pub = _clean_spaces(data.publisher)
+    yr = data.year
+    edition = _clean_spaces(data.edition) if data.edition else ""
+    pin = _clean_spaces(data.pinpoint) if data.pinpoint else ""
 
-    book_title_txt = d.book_title.strip()
-    book_title_html = _italics_html(book_title_txt)
+    inside = f"{pub}"
+    if edition:
+        inside += f", {edition}"
+    inside += f", {yr}"
 
-    inside_bits = [d.publisher.strip()]
-    if _clean(d.edition):
-        inside_bits.append(d.edition.strip())
-    inside_bits.append(d.year.strip())
-    inside = ", ".join(inside_bits)
+    base_text = f"{authors}, {title_plain} ({inside})"
+    base_html = f"{_escape_html(authors)}, {title_html} ({_escape_html(inside)})"
 
-    start = f", {d.starting_page.strip()}" if _clean(d.starting_page) else ""
-    pin = f" {_clean(d.pinpoint)}" if _clean(d.pinpoint) else ""
+    if pin:
+        base_text += f" {pin}"
+        base_html += f" {_escape_html(pin)}"
 
-    txt = _end_full_stop(
-        f"{ca_txt}, '{d.chapter_title.strip()}' in {ed_txt} (ed{'s' if len(d.editors) != 1 else ''}), "
-        f"{book_title_txt} ({inside}){start}{pin}"
-    )
-    html = _end_full_stop(
-        f"{_plain(ca_txt)}, '{_plain(d.chapter_title.strip())}' in {_plain(ed_txt)} (ed{'s' if len(d.editors) != 1 else ''}), "
-        f"{book_title_html} ({_plain(inside)}){_plain(start)}{_plain(pin)}"
-    )
-    return CitationResult(SourceType.BOOK_CHAPTER, mode, txt, html)
+    return CitationResult(source_type=SourceType.book, mode=mode, text=_ensure_ends_with_period(base_text), html=_ensure_ends_with_period(base_html))
 
 
-def _format_media(d: MediaArticleData, mode: Mode) -> CitationResult:
-    authors_txt = _join_authors_bibliography(d.authors) if mode == "bibliography" else _join_authors_footnote(d.authors)
-    org = _clean(d.org_as_author)
+def _format_book_chapter(data: BookChapterCitation, mode: str) -> CitationResult:
+    ch_authors = _join_authors(data.chapter_authors, mode)
+    if not ch_authors:
+        raise ValueError("Chapter author(s) required.")
 
-    author_part = authors_txt if authors_txt else org
-    if not author_part:
-        raise ValueError("Media article requires author(s) or an organisation author.")
+    editors = _join_authors(data.editors, mode)
+    if not editors:
+        raise ValueError("Editor(s) required for book chapters.")
 
-    paper_txt = d.newspaper_title.strip()
-    paper_html = _italics_html(paper_txt)
+    ch_title = _clean_spaces(data.chapter_title)
+    book_plain, book_html = _italics_text(data.book_title)
 
-    city = f", {d.city.strip()}" if _clean(d.city) else ""
-    page = f", {d.page.strip()}" if _clean(d.page) else ""
+    pub = _clean_spaces(data.publisher)
+    yr = data.year
+    edition = _clean_spaces(data.edition) if data.edition else ""
+    start = _clean_spaces(data.starting_page) if data.starting_page else ""
+    pin = _clean_spaces(data.pinpoint) if data.pinpoint else ""
 
-    txt = _end_full_stop(f"{author_part}, '{d.article_title.strip()}', {paper_txt}{city}, {d.date.strip()}{page}")
-    html = _end_full_stop(f"{_plain(author_part)}, '{_plain(d.article_title.strip())}', {paper_html}{_plain(city)}, {_plain(d.date.strip())}{_plain(page)}")
-    return CitationResult(SourceType.MEDIA_ARTICLE, mode, txt, html)
+    inside = f"{pub}"
+    if edition:
+        inside += f", {edition}"
+    inside += f", {yr}"
+
+    base_text = f"{ch_authors}, '{ch_title}' in {editors} (eds), {book_plain} ({inside})"
+    base_html = f"{_escape_html(ch_authors)}, '{_escape_html(ch_title)}' in {_escape_html(editors)} (eds), {book_html} ({_escape_html(inside)})"
+
+    if start:
+        base_text += f" {start}"
+        base_html += f" {_escape_html(start)}"
+    if pin:
+        base_text += f", {pin}"
+        base_html += f", {_escape_html(pin)}"
+
+    return CitationResult(source_type=SourceType.book_chapter, mode=mode, text=_ensure_ends_with_period(base_text), html=_ensure_ends_with_period(base_html))
 
 
-def _format_report(d: ReportData, mode: Mode) -> CitationResult:
-    author = d.author_or_org.strip()
-    title_txt = d.title.strip()
-    title_html = _italics_html(title_txt)
+def _format_media(data: MediaArticleCitation, mode: str) -> CitationResult:
+    author = ""
+    if data.org_as_author:
+        author = _clean_spaces(data.org_as_author)
+    else:
+        author = _join_authors(data.authors, mode)
 
-    inside_bits = []
-    if _clean(d.report_number_or_series):
-        inside_bits.append(d.report_number_or_series.strip())
-    if _clean(d.publisher):
-        inside_bits.append(d.publisher.strip())
-    if _clean(d.place):
-        inside_bits.append(d.place.strip())
-    if _clean(d.date):
-        inside_bits.append(d.date.strip())
-    inside = ", ".join(inside_bits) if inside_bits else ""
+    if not author:
+        raise ValueError("Provide an author or an organisation as author for media articles.")
 
-    pin = f" {_clean(d.pinpoint)}" if _clean(d.pinpoint) else ""
+    title = _clean_spaces(data.article_title)
+    paper_plain, paper_html = _italics_text(data.newspaper_title)
+
+    city = _clean_spaces(data.city) if data.city else ""
+    date = _clean_spaces(data.date)
+    page = _clean_spaces(data.page) if data.page else ""
+
+    # AGLC: Author, 'Title' (Newspaper, City, Date) page.
+    paren_bits = [paper_plain]
+    if city:
+        paren_bits.append(city)
+    paren_bits.append(date)
+    paren = ", ".join(paren_bits)
+
+    text = f"{author}, '{title}' ({paren})"
+    html = f"{_escape_html(author)}, '{_escape_html(title)}' ({paper_html}"
+    if city:
+        html += f", {_escape_html(city)}"
+    html += f", {_escape_html(date)})"
+
+    if page:
+        text += f" {page}"
+        html += f" {_escape_html(page)}"
+
+    text = _ensure_ends_with_period(text)
+    html = _ensure_ends_with_period(html)
+
+    if data.is_online:
+        if not data.url or not data.access_date:
+            raise ValueError("Online media articles require URL and access date.")
+        text = text[:-1] + f" <{data.url}> accessed {data.access_date}."
+        html = html[:-1] + f" &lt;{_escape_html(data.url)}&gt; accessed {_escape_html(data.access_date)}."
+
+    return CitationResult(source_type=SourceType.media_article, mode=mode, text=text, html=html)
+
+
+def _format_report(data: ReportCitation, mode: str) -> CitationResult:
+    author = _clean_spaces(data.author_or_org)
+    title_plain, title_html = _italics_text(data.title)
+
+    series = _clean_spaces(data.report_number_or_series) if data.report_number_or_series else ""
+    publisher = _clean_spaces(data.publisher) if data.publisher else ""
+    place = _clean_spaces(data.place) if data.place else ""
+    date = _clean_spaces(data.date) if data.date else ""
+    pin = _clean_spaces(data.pinpoint) if data.pinpoint else ""
+
+    bits = []
+    if series:
+        bits.append(series)
+    if publisher:
+        bits.append(publisher)
+    if place:
+        bits.append(place)
+    if date:
+        bits.append(date)
+
+    inside = ", ".join(bits) if bits else ""
+
+    base_text = f"{author}, {title_plain}"
+    base_html = f"{_escape_html(author)}, {title_html}"
 
     if inside:
-        txt = _end_full_stop(f"{author}, {title_txt} ({inside}){pin}")
-        html = _end_full_stop(f"{_plain(author)}, {title_html} ({_plain(inside)}){_plain(pin)}")
-    else:
-        txt = _end_full_stop(f"{author}, {title_txt}{pin}")
-        html = _end_full_stop(f"{_plain(author)}, {title_html}{_plain(pin)}")
+        base_text += f" ({inside})"
+        base_html += f" ({_escape_html(inside)})"
 
-    return CitationResult(SourceType.REPORT, mode, txt, html)
+    if pin:
+        base_text += f" {pin}"
+        base_html += f" {_escape_html(pin)}"
+
+    text = _ensure_ends_with_period(base_text)
+    html = _ensure_ends_with_period(base_html)
+
+    if data.is_online:
+        if not data.url or not data.access_date:
+            raise ValueError("Online reports require URL and access date.")
+        text = text[:-1] + f" <{data.url}> accessed {data.access_date}."
+        html = html[:-1] + f" &lt;{_escape_html(data.url)}&gt; accessed {_escape_html(data.access_date)}."
+
+    return CitationResult(source_type=SourceType.report, mode=mode, text=text, html=html)
 
 
-def _format_website(d: WebsiteData, mode: Mode) -> CitationResult:
-    author = _clean(d.author_or_org)
-    if not author:
-        # Organisation can be the site name, but keep distinction in case user supplied org in site_name
-        author = d.site_name.strip()
+def _format_website(data: WebsiteCitation, mode: str) -> CitationResult:
+    author = _clean_spaces(data.author_or_org) if data.author_or_org else ""
+    title = _clean_spaces(data.page_title)
+    site = _clean_spaces(data.site_name)
+    date = _clean_spaces(data.date) if data.date else ""
+    url = _clean_spaces(data.url)
+    access = _clean_spaces(data.access_date) if data.access_date else ""
 
-    title = d.page_title.strip()
-    site = d.site_name.strip()
-    date = _clean(d.date)
-    url = d.url.strip()
-    access = _clean(d.access_date)
+    if not url:
+        raise ValueError("URL is required for website citations.")
+
+    # AGLC-ish: Author, 'Title' (Site, Date) <url> accessed ...
+    who = author if author else site
 
     if date:
-        base_txt = f"{author}, '{title}' ({site}, {date}) <{url}>"
-        base_html = f"{_plain(author)}, '{_plain(title)}' ({_plain(site)}, {_plain(date)}) &lt;{_plain(url)}&gt;"
+        text = f"{who}, '{title}' ({site}, {date}) <{url}>"
+        html = f"{_escape_html(who)}, '{_escape_html(title)}' ({_escape_html(site)}, {_escape_html(date)}) &lt;{_escape_html(url)}&gt;"
     else:
-        base_txt = f"{author}, '{title}' ({site}) <{url}>"
-        base_html = f"{_plain(author)}, '{_plain(title)}' ({_plain(site)}) &lt;{_plain(url)}&gt;"
+        text = f"{who}, '{title}' ({site}) <{url}>"
+        html = f"{_escape_html(who)}, '{_escape_html(title)}' ({_escape_html(site)}) &lt;{_escape_html(url)}&gt;"
 
     if access:
-        base_txt += f" accessed {access}"
-        base_html += f" {_plain(' accessed ' + access)}"
+        text += f" accessed {access}"
+        html += f" accessed {_escape_html(access)}"
 
-    return CitationResult(SourceType.WEBSITE, mode, _end_full_stop(base_txt), _end_full_stop(base_html))
+    return CitationResult(source_type=SourceType.website, mode=mode, text=_ensure_ends_with_period(text), html=_ensure_ends_with_period(html))
 
 
-# -------------------------
-# Public API
-# -------------------------
+# ---------------------------
+# Public entry point
+# ---------------------------
 
-def format_citation(source_type: Union[SourceType, str], data: dict, mode: Mode = "footnote") -> CitationResult:
-    st = SourceType(source_type) if isinstance(source_type, str) else source_type
-    if mode not in ("footnote", "bibliography"):
-        raise ValueError("mode must be footnote or bibliography")
+def format_citation(source_type: SourceType | str, data: Dict[str, Any], mode: str = "footnote") -> CitationResult:
+    st = SourceType(str(source_type))
+    mode_clean = (mode or "footnote").strip().lower()
+    if mode_clean not in ("footnote", "bibliography"):
+        raise ValueError("Mode must be footnote or bibliography.")
 
-    d = _validate_data(st, data)
+    if st == SourceType.case:
+        m = CaseCitation(**data)
+        return _format_case(m, mode_clean)
 
-    if st == SourceType.CASE:
-        return _format_case(d, mode)  # type: ignore[arg-type]
-    if st == SourceType.LEGISLATION:
-        return _format_legislation(d, mode)  # type: ignore[arg-type]
-    if st == SourceType.JOURNAL_ARTICLE:
-        return _format_journal(d, mode)  # type: ignore[arg-type]
-    if st == SourceType.BOOK:
-        return _format_book(d, mode)  # type: ignore[arg-type]
-    if st == SourceType.BOOK_CHAPTER:
-        return _format_book_chapter(d, mode)  # type: ignore[arg-type]
-    if st == SourceType.MEDIA_ARTICLE:
-        return _format_media(d, mode)  # type: ignore[arg-type]
-    if st == SourceType.REPORT:
-        return _format_report(d, mode)  # type: ignore[arg-type]
-    if st == SourceType.WEBSITE:
-        return _format_website(d, mode)  # type: ignore[arg-type]
+    if st == SourceType.legislation:
+        m = LegislationCitation(**data)
+        return _format_legislation(m, mode_clean)
 
-    raise ValueError("unsupported source_type")
+    if st == SourceType.journal_article:
+        m = JournalArticleCitation(**data)
+        return _format_journal(m, mode_clean)
+
+    if st == SourceType.book:
+        m = BookCitation(**data)
+        return _format_book(m, mode_clean)
+
+    if st == SourceType.book_chapter:
+        m = BookChapterCitation(**data)
+        return _format_book_chapter(m, mode_clean)
+
+    if st == SourceType.media_article:
+        m = MediaArticleCitation(**data)
+        return _format_media(m, mode_clean)
+
+    if st == SourceType.report:
+        m = ReportCitation(**data)
+        return _format_report(m, mode_clean)
+
+    if st == SourceType.website:
+        m = WebsiteCitation(**data)
+        return _format_website(m, mode_clean)
+
+    raise ValueError("Unsupported source type.")
