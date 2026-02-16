@@ -1,27 +1,20 @@
 # aglc_engine.py
-# Lexcite AGLC4 Engine for Lexionary
+# Lexcite AGLC4 formatting engine (deterministic, HTML italics support)
 # Version: 2.0.0
-# - Builder-first AGLC formatting with strict required fields per source type
-# - Normalises common casing issues (CLR, HCA, NSW, Cth, etc)
-# - Returns BOTH plain text and safe HTML (italics via <i> only)
-#
-# Notes:
-# - This is not a full AGLC4 treatise. It is a pragmatic, accuracy-first engine for common student citations.
-# - Italics are returned as <i> tags only so the frontend can safely render and copy rich text.
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 
-# -------------------------------------------------------------------
-# Public API types
-# -------------------------------------------------------------------
+# -----------------------------
+# Public API
+# -----------------------------
 
 class SourceType(str, Enum):
     case = "case"
@@ -32,738 +25,1043 @@ class SourceType(str, Enum):
     media_article = "media_article"
     report = "report"
     website = "website"
+    other = "other"
 
 
 @dataclass
 class CitationResult:
     source_type: SourceType
-    mode: str
+    mode: str  # "footnote" | "bibliography"
     text: str
     html: str
 
 
-# -------------------------------------------------------------------
-# Normalisers
-# -------------------------------------------------------------------
+def format_citation(
+    source_type: Union[SourceType, str],
+    data: Dict[str, Any],
+    mode: str = "footnote",
+) -> CitationResult:
+    st = SourceType(str(source_type))
+    mode = (mode or "footnote").strip().lower()
+    if mode not in ("footnote", "bibliography"):
+        mode = "footnote"
 
-def _clean(s: Optional[str]) -> Optional[str]:
-    if s is None:
-        return None
-    x = str(s).strip()
-    return x if x else None
+    if st == SourceType.case:
+        model = CaseInput.model_validate(data)
+        text, html = format_case(model)
+        return CitationResult(source_type=st, mode=mode, text=text, html=html)
+
+    if st == SourceType.legislation:
+        model = LegislationInput.model_validate(data)
+        text, html = format_legislation(model)
+        return CitationResult(source_type=st, mode=mode, text=text, html=html)
+
+    if st == SourceType.journal_article:
+        model = JournalArticleInput.model_validate(data)
+        text, html = format_journal_article(model)
+        return CitationResult(source_type=st, mode=mode, text=text, html=html)
+
+    if st == SourceType.book:
+        model = BookInput.model_validate(data)
+        text, html = format_book(model)
+        return CitationResult(source_type=st, mode=mode, text=text, html=html)
+
+    if st == SourceType.book_chapter:
+        model = BookChapterInput.model_validate(data)
+        text, html = format_book_chapter(model)
+        return CitationResult(source_type=st, mode=mode, text=text, html=html)
+
+    if st == SourceType.media_article:
+        model = MediaArticleInput.model_validate(data)
+        text, html = format_media_article(model)
+        return CitationResult(source_type=st, mode=mode, text=text, html=html)
+
+    if st == SourceType.report:
+        model = ReportInput.model_validate(data)
+        text, html = format_report(model)
+        return CitationResult(source_type=st, mode=mode, text=text, html=html)
+
+    if st == SourceType.website:
+        model = WebsiteInput.model_validate(data)
+        text, html = format_website(model)
+        return CitationResult(source_type=st, mode=mode, text=text, html=html)
+
+    # Fallback
+    raw = str(data.get("raw") or "").strip()
+    return CitationResult(source_type=SourceType.other, mode=mode, text=raw, html=escape_text(raw))
 
 
-def norm_reporter(rep: Optional[str]) -> Optional[str]:
-    rep = _clean(rep)
-    if not rep:
-        return None
-    return rep.upper()
+# -----------------------------
+# Paste mode helpers (freeform)
+# -----------------------------
+
+class PasteEntry(BaseModel):
+    raw: str
+    source_type: str
+    text: str
+    html: str
+    validated: bool
+    validation_errors: List[str] = Field(default_factory=list)
+    meta: Dict[str, Any] = Field(default_factory=dict)
 
 
-def norm_court(court: Optional[str]) -> Optional[str]:
-    court = _clean(court)
-    if not court:
-        return None
-    return court.upper()
-
-
-def norm_jurisdiction(j: Optional[str]) -> Optional[str]:
-    j = _clean(j)
-    if not j:
-        return None
-    up = j.upper()
-    if up == "CTH":
-        return "Cth"
-    if up in {"NSW", "WA", "SA", "ACT", "NT"}:
-        return up
-    if up == "VIC":
-        return "Vic"
-    if up == "QLD":
-        return "Qld"
-    if up == "TAS":
-        return "Tas"
-    return j
-
-
-def _ensure_trailing_full_stop(s: str) -> str:
-    s2 = s.strip()
-    if not s2.endswith("."):
-        s2 += "."
-    return s2
-
-
-def _as_int_str(s: Optional[str]) -> Optional[str]:
-    s = _clean(s)
+def format_freeform_line(raw: str) -> PasteEntry:
+    s = (raw or "").strip()
     if not s:
-        return None
-    if not re.fullmatch(r"\d+", s):
-        return s
-    return s
+        return PasteEntry(raw=raw, source_type="OTHER", text="", html="", validated=False, validation_errors=["Empty line."])
+
+    st = detect_source_type_freeform(s)
+
+    if st == SourceType.case:
+        entry = format_case_freeform(s)
+        return entry
+
+    if st == SourceType.legislation:
+        entry = format_legislation_freeform(s)
+        return entry
+
+    if st == SourceType.journal_article:
+        entry = format_journal_freeform(s)
+        return entry
+
+    if st == SourceType.book:
+        entry = format_book_freeform(s)
+        return entry
+
+    if st == SourceType.website:
+        entry = format_website_freeform(s)
+        return entry
+
+    # Unknown
+    return PasteEntry(
+        raw=s,
+        source_type="OTHER",
+        text=s,
+        html=escape_text(s),
+        validated=False,
+        validation_errors=["Unsupported or unrecognised source pattern in paste mode. Use Build mode for reliability."],
+        meta={},
+    )
 
 
-def _ital(s: str) -> str:
-    return f"<i>{s}</i>"
+def detect_source_type_freeform(text: str) -> SourceType:
+    t = text.strip()
+
+    # Website
+    if re.search(r"https?://", t) or re.search(r"<https?://", t):
+        return SourceType.website
+
+    # Legislation
+    if re.search(r"\bAct\s+\d{4}\b", t) or re.search(r"\bRegulations?\b", t):
+        return SourceType.legislation
+
+    # Case: " v " plus either neutral or reported
+    if re.search(r"\bv\b", t) and re.search(r"\s+v\s+", t, re.I):
+        return SourceType.case
+
+    # Journal: has quoted title + year + journal + page
+    if re.search(r"'.+?'\s*\(\d{4}\)", t) and re.search(r"\b\d+\s*$", t):
+        return SourceType.journal_article
+
+    # Book: (Publisher, ed, year) or similar
+    if re.search(r"\([^,]+,\s*\d+(st|nd|rd|th)\s+ed,\s*\d{4}\)", t, re.I):
+        return SourceType.book
+
+    return SourceType.other
 
 
-def _strip_outer_quotes(title: str) -> str:
-    t = title.strip()
-    t = t.strip('"').strip("'")
-    return t.strip()
+# -----------------------------
+# Models
+# -----------------------------
 
+class CaseInput(BaseModel):
+    case_name: str = Field(..., min_length=2)
+    year: str = Field(..., pattern=r"^\d{4}$")
 
-# -------------------------------------------------------------------
-# Name formatting helpers
-# -------------------------------------------------------------------
-
-def _split_person_name(name: str) -> Tuple[str, str]:
-    """
-    Very small heuristic:
-    "Jane Mary Smith" -> ("Jane Mary", "Smith")
-    If only one token, treat as surname.
-    """
-    parts = [p for p in name.strip().split() if p]
-    if not parts:
-        return ("", "")
-    if len(parts) == 1:
-        return ("", parts[0])
-    given = " ".join(parts[:-1])
-    surname = parts[-1]
-    return (given, surname)
-
-
-def format_authors_footnote(authors: List[str]) -> str:
-    clean = [a.strip() for a in authors if a and a.strip()]
-    return ", ".join(clean)
-
-
-def format_authors_bibliography(authors: List[str]) -> str:
-    clean = [a.strip() for a in authors if a and a.strip()]
-    out: List[str] = []
-    for a in clean:
-        given, surname = _split_person_name(a)
-        if surname and given:
-            out.append(f"{surname}, {given}")
-        else:
-            out.append(a)
-    return ", ".join(out)
-
-
-def format_author_or_org_footnote(author_or_org: Optional[str]) -> str:
-    a = _clean(author_or_org)
-    return a or ""
-
-
-def format_author_or_org_bibliography(author_or_org: Optional[str]) -> str:
-    a = _clean(author_or_org)
-    if not a:
-        return ""
-    given, surname = _split_person_name(a)
-    if surname and given:
-        return f"{surname}, {given}"
-    return a
-
-
-# -------------------------------------------------------------------
-# Pydantic models for builder input
-# -------------------------------------------------------------------
-
-class CaseData(BaseModel):
-    case_name: str
-    year: str
+    # Reported
     reporter_series_by_year: bool = False
     volume: Optional[str] = None
     reporter: Optional[str] = None
     first_page: Optional[str] = None
+
+    # Neutral
     court: Optional[str] = None
     decision_number: Optional[str] = None
+
     neutral_citation_first: bool = True
-    unreported: bool = False
-    pinpoint_type: Optional[str] = None   # "page" | "paragraph"
+    unreported: bool = False  # if True, neutral is required
+
+    # Pinpoint
+    pinpoint_type: Optional[str] = None  # "page" | "paragraph"
     pinpoint: Optional[str] = None
 
-    @field_validator("case_name")
-    @classmethod
-    def _v_case_name(cls, v: str) -> str:
-        v2 = (v or "").strip()
-        if not v2:
-            raise ValueError("case_name is required")
-        return v2
+    @model_validator(mode="after")
+    def _check_case(self):
+        # Normalise
+        self.case_name = normalise_case_name(self.case_name)
 
-    @field_validator("year")
-    @classmethod
-    def _v_year(cls, v: str) -> str:
-        v2 = (v or "").strip()
-        if not re.fullmatch(r"\d{4}", v2):
-            raise ValueError("year must be 4 digits")
-        return v2
+        if self.reporter:
+            self.reporter = normalise_reporter(self.reporter)
+
+        if self.court:
+            self.court = normalise_court(self.court)
+
+        # Require at least one citation form
+        has_neutral = bool(self.court and self.decision_number)
+        has_reported = bool(self.volume and self.reporter and self.first_page)
+
+        if self.unreported and not has_neutral:
+            raise ValueError("Unreported cases require a neutral citation (court and decision number).")
+
+        if not has_neutral and not has_reported:
+            raise ValueError("Provide either a neutral citation (court + decision number) or a reported citation (volume + reporter + first page).")
+
+        # Pinpoint validity
+        if self.pinpoint_type:
+            pt = self.pinpoint_type.strip().lower()
+            if pt not in ("page", "paragraph"):
+                raise ValueError("Pinpoint type must be 'page' or 'paragraph'.")
+            if not self.pinpoint:
+                raise ValueError("Pinpoint value is required when a pinpoint type is selected.")
+
+        return self
 
 
-class LegislationData(BaseModel):
-    title: str
-    year: str
-    jurisdiction: str
+class LegislationInput(BaseModel):
+    title: str = Field(..., min_length=2)
+    year: str = Field(..., pattern=r"^\d{4}$")
+    jurisdiction: str = Field(..., min_length=2)
+
     is_bill: bool = False
-    pinpoint_unit: Optional[str] = None   # "s" | "ss"
+    pinpoint_unit: Optional[str] = None  # s | ss | reg | regs etc
     pinpoint_number: Optional[str] = None
 
-    @field_validator("title")
-    @classmethod
-    def _v_title(cls, v: str) -> str:
-        v2 = (v or "").strip()
-        if not v2:
-            raise ValueError("title is required")
-        return v2
-
-    @field_validator("year")
-    @classmethod
-    def _v_year(cls, v: str) -> str:
-        v2 = (v or "").strip()
-        if not re.fullmatch(r"\d{4}", v2):
-            raise ValueError("year must be 4 digits")
-        return v2
-
-    @field_validator("jurisdiction")
-    @classmethod
-    def _v_jur(cls, v: str) -> str:
-        v2 = (v or "").strip()
-        if not v2:
-            raise ValueError("jurisdiction is required")
-        return v2
+    @model_validator(mode="after")
+    def _check_leg(self):
+        self.title = normalise_titlecase(self.title)
+        self.jurisdiction = normalise_jurisdiction(self.jurisdiction)
+        if self.pinpoint_unit:
+            self.pinpoint_unit = self.pinpoint_unit.strip()
+        if self.pinpoint_number:
+            self.pinpoint_number = self.pinpoint_number.strip()
+        return self
 
 
-class JournalArticleData(BaseModel):
-    authors: List[str]
-    article_title: str
-    year: str
+class JournalArticleInput(BaseModel):
+    authors: List[str] = Field(..., min_length=1)
+    article_title: str = Field(..., min_length=2)
+    year: str = Field(..., pattern=r"^\d{4}$")
     year_in_square_brackets: bool = False
+
     volume: Optional[str] = None
     issue: Optional[str] = None
-    journal_title: str
-    starting_page: str
+    journal_title: str = Field(..., min_length=2)
+    starting_page: str = Field(..., min_length=1)
     pinpoint: Optional[str] = None
+
     is_online: bool = False
     url: Optional[str] = None
     access_date: Optional[str] = None
 
-    @field_validator("authors")
-    @classmethod
-    def _v_auth(cls, v: List[str]) -> List[str]:
-        if not v or not any(a.strip() for a in v):
-            raise ValueError("authors is required")
-        return [a.strip() for a in v if a and a.strip()]
+    @model_validator(mode="after")
+    def _check_ja(self):
+        self.authors = [normalise_person_name(a) for a in self.authors if a and a.strip()]
+        self.article_title = normalise_titlecase(self.article_title)
+        self.journal_title = normalise_titlecase(self.journal_title)
 
-    @field_validator("article_title", "journal_title", "starting_page")
-    @classmethod
-    def _v_req(cls, v: str) -> str:
-        v2 = (v or "").strip()
-        if not v2:
-            raise ValueError("required field missing")
-        return v2
-
-    @field_validator("year")
-    @classmethod
-    def _v_year(cls, v: str) -> str:
-        v2 = (v or "").strip()
-        if not re.fullmatch(r"\d{4}", v2):
-            raise ValueError("year must be 4 digits")
-        return v2
+        if self.is_online:
+            if not self.url:
+                raise ValueError("Online journal articles require a URL.")
+            if not self.access_date:
+                raise ValueError("Online journal articles require an access date.")
+        return self
 
 
-class BookData(BaseModel):
-    authors: List[str]
-    title: str
-    publisher: str
-    year: str
+class BookInput(BaseModel):
+    authors: List[str] = Field(..., min_length=1)
+    title: str = Field(..., min_length=2)
+    publisher: str = Field(..., min_length=1)
+    year: str = Field(..., pattern=r"^\d{4}$")
     edition: Optional[str] = None
     pinpoint: Optional[str] = None
 
-    @field_validator("authors")
-    @classmethod
-    def _v_auth(cls, v: List[str]) -> List[str]:
-        if not v or not any(a.strip() for a in v):
-            raise ValueError("authors is required")
-        return [a.strip() for a in v if a and a.strip()]
-
-    @field_validator("title", "publisher")
-    @classmethod
-    def _v_req(cls, v: str) -> str:
-        v2 = (v or "").strip()
-        if not v2:
-            raise ValueError("required field missing")
-        return v2
-
-    @field_validator("year")
-    @classmethod
-    def _v_year(cls, v: str) -> str:
-        v2 = (v or "").strip()
-        if not re.fullmatch(r"\d{4}", v2):
-            raise ValueError("year must be 4 digits")
-        return v2
+    @model_validator(mode="after")
+    def _check_book(self):
+        self.authors = [normalise_person_name(a) for a in self.authors if a and a.strip()]
+        self.title = normalise_titlecase(self.title)
+        self.publisher = self.publisher.strip()
+        if self.edition:
+            self.edition = self.edition.strip()
+        if self.pinpoint:
+            self.pinpoint = self.pinpoint.strip()
+        return self
 
 
-class BookChapterData(BaseModel):
-    chapter_authors: List[str]
-    chapter_title: str
-    editors: List[str]
-    book_title: str
-    publisher: str
-    year: str
+class BookChapterInput(BaseModel):
+    chapter_authors: List[str] = Field(..., min_length=1)
+    chapter_title: str = Field(..., min_length=2)
+    editors: List[str] = Field(..., min_length=1)
+    book_title: str = Field(..., min_length=2)
+    publisher: str = Field(..., min_length=1)
+    year: str = Field(..., pattern=r"^\d{4}$")
+
     edition: Optional[str] = None
     starting_page: Optional[str] = None
     pinpoint: Optional[str] = None
 
-    @field_validator("chapter_authors", "editors")
-    @classmethod
-    def _v_lists(cls, v: List[str]) -> List[str]:
-        if not v or not any(a.strip() for a in v):
-            raise ValueError("required list missing")
-        return [a.strip() for a in v if a and a.strip()]
-
-    @field_validator("chapter_title", "book_title", "publisher")
-    @classmethod
-    def _v_req(cls, v: str) -> str:
-        v2 = (v or "").strip()
-        if not v2:
-            raise ValueError("required field missing")
-        return v2
-
-    @field_validator("year")
-    @classmethod
-    def _v_year(cls, v: str) -> str:
-        v2 = (v or "").strip()
-        if not re.fullmatch(r"\d{4}", v2):
-            raise ValueError("year must be 4 digits")
-        return v2
+    @model_validator(mode="after")
+    def _check_ch(self):
+        self.chapter_authors = [normalise_person_name(a) for a in self.chapter_authors if a and a.strip()]
+        self.editors = [normalise_person_name(a) for a in self.editors if a and a.strip()]
+        self.chapter_title = normalise_titlecase(self.chapter_title)
+        self.book_title = normalise_titlecase(self.book_title)
+        self.publisher = self.publisher.strip()
+        if self.edition:
+            self.edition = self.edition.strip()
+        return self
 
 
-class MediaArticleData(BaseModel):
+class MediaArticleInput(BaseModel):
     authors: List[str] = Field(default_factory=list)
     org_as_author: Optional[str] = None
-    article_title: str
-    newspaper_title: str
+    article_title: str = Field(..., min_length=2)
+    newspaper_title: str = Field(..., min_length=2)
     city: Optional[str] = None
-    date: str
+    date: str = Field(..., min_length=4)
     page: Optional[str] = None
+
     is_online: bool = False
     url: Optional[str] = None
     access_date: Optional[str] = None
 
-    @field_validator("article_title", "newspaper_title", "date")
-    @classmethod
-    def _v_req(cls, v: str) -> str:
-        v2 = (v or "").strip()
-        if not v2:
-            raise ValueError("required field missing")
-        return v2
+    @model_validator(mode="after")
+    def _check_ma(self):
+        self.authors = [normalise_person_name(a) for a in self.authors if a and a.strip()]
+        if self.org_as_author:
+            self.org_as_author = normalise_titlecase(self.org_as_author)
+        self.article_title = normalise_titlecase(self.article_title)
+        self.newspaper_title = normalise_titlecase(self.newspaper_title)
+        if self.city:
+            self.city = normalise_titlecase(self.city)
+        if self.is_online:
+            if not self.url:
+                raise ValueError("Online media articles require a URL.")
+            if not self.access_date:
+                raise ValueError("Online media articles require an access date.")
+        return self
 
 
-class ReportData(BaseModel):
-    author_or_org: str
-    title: str
+class ReportInput(BaseModel):
+    author_or_org: str = Field(..., min_length=2)
+    title: str = Field(..., min_length=2)
     report_number_or_series: Optional[str] = None
     publisher: Optional[str] = None
     place: Optional[str] = None
     date: Optional[str] = None
     pinpoint: Optional[str] = None
+
     is_online: bool = False
     url: Optional[str] = None
     access_date: Optional[str] = None
 
-    @field_validator("author_or_org", "title")
-    @classmethod
-    def _v_req(cls, v: str) -> str:
-        v2 = (v or "").strip()
-        if not v2:
-            raise ValueError("required field missing")
-        return v2
+    @model_validator(mode="after")
+    def _check_rep(self):
+        self.author_or_org = normalise_titlecase(self.author_or_org)
+        self.title = normalise_titlecase(self.title)
+        if self.publisher:
+            self.publisher = normalise_titlecase(self.publisher)
+        if self.place:
+            self.place = normalise_titlecase(self.place)
+        if self.is_online:
+            if not self.url:
+                raise ValueError("Online reports require a URL.")
+            if not self.access_date:
+                raise ValueError("Online reports require an access date.")
+        return self
 
 
-class WebsiteData(BaseModel):
+class WebsiteInput(BaseModel):
     author_or_org: Optional[str] = None
-    page_title: str
-    site_name: str
+    page_title: str = Field(..., min_length=2)
+    site_name: str = Field(..., min_length=2)
     date: Optional[str] = None
-    url: str
-    access_date: str
+    url: str = Field(..., min_length=8)
+    access_date: str = Field(..., min_length=4)
 
-    @field_validator("page_title", "site_name", "url", "access_date")
-    @classmethod
-    def _v_req(cls, v: str) -> str:
-        v2 = (v or "").strip()
-        if not v2:
-            raise ValueError("required field missing")
-        return v2
-
-
-# -------------------------------------------------------------------
-# Formatters
-# -------------------------------------------------------------------
-
-def _pin_case(pinpoint_type: Optional[str], pinpoint: Optional[str]) -> Tuple[str, str]:
-    """
-    Returns (plain_suffix, html_suffix) including leading punctuation if needed.
-    """
-    pt = _clean(pinpoint_type)
-    pv = _clean(pinpoint)
-    if not pt or not pv:
-        return ("", "")
-    if pt == "paragraph":
-        return (f" [{pv}]", f" [{pv}]")
-    if pt == "page":
-        return (f" at {pv}", f" at {pv}")
-    return ("", "")
+    @model_validator(mode="after")
+    def _check_web(self):
+        if self.author_or_org:
+            self.author_or_org = normalise_titlecase(self.author_or_org)
+        self.page_title = normalise_titlecase(self.page_title)
+        self.site_name = normalise_titlecase(self.site_name)
+        self.url = self.url.strip()
+        self.access_date = self.access_date.strip()
+        if self.date:
+            self.date = self.date.strip()
+        return self
 
 
-def format_case(data: CaseData, mode: str) -> Tuple[str, str]:
-    case_name_plain = data.case_name.strip()
-    case_name_html = _ital(case_name_plain)
+# -----------------------------
+# Formatting rules (AGLC-ish)
+# -----------------------------
 
-    year = data.year.strip()
-    court = norm_court(data.court)
-    decision = _clean(data.decision_number)
+def format_case(m: CaseInput) -> Tuple[str, str]:
+    # Case name always italic
+    name_html = f"<i>{escape_text(m.case_name)}</i>"
+    name_text = m.case_name
 
-    reporter = norm_reporter(data.reporter)
-    volume = _clean(data.volume)
-    first_page = _clean(data.first_page)
+    has_neutral = bool(m.court and m.decision_number)
+    has_reported = bool(m.volume and m.reporter and m.first_page)
 
-    pin_plain, pin_html = _pin_case(data.pinpoint_type, data.pinpoint)
-
-    neutral = ""
-    neutral_html = ""
-    if court and decision:
-        neutral = f"[{year}] {court} {decision}"
-        neutral_html = neutral
-
-    reported = ""
-    reported_html = ""
-    if volume and reporter and first_page:
-        if data.reporter_series_by_year:
-            reported = f"[{year}] {volume} {reporter} {first_page}"
+    # Pinpoint formatting
+    pin_text = ""
+    pin_html = ""
+    if m.pinpoint_type and m.pinpoint:
+        pt = m.pinpoint_type.strip().lower()
+        val = normalise_pinpoint_value(m.pinpoint)
+        if pt == "paragraph":
+            pin_text = f"[{val}]"
+            pin_html = f"[{escape_text(val)}]"
         else:
-            reported = f"({year}) {volume} {reporter} {first_page}"
-        reported_html = reported
+            pin_text = f"{val}"
+            pin_html = escape_text(val)
 
-    if data.unreported:
-        if not neutral:
-            raise ValueError("Unreported case requires court and decision number for neutral citation.")
-        core_plain = f"{case_name_plain} {neutral}{pin_plain}"
-        core_html = f"{case_name_html} {neutral_html}{pin_html}"
-        return (_ensure_trailing_full_stop(core_plain), _ensure_trailing_full_stop(core_html))
+    # Compose parts
+    neutral_text = ""
+    neutral_html = ""
+    if has_neutral:
+        neutral_text = f"[{m.year}] {m.court} {m.decision_number}"
+        neutral_html = f"[{escape_text(m.year)}] {escape_text(m.court)} {escape_text(m.decision_number)}"
 
-    # If only one of neutral/reported exists
-    if neutral and not reported:
-        core_plain = f"{case_name_plain} {neutral}{pin_plain}"
-        core_html = f"{case_name_html} {neutral_html}{pin_html}"
-        return (_ensure_trailing_full_stop(core_plain), _ensure_trailing_full_stop(core_html))
+    reported_text = ""
+    reported_html = ""
+    if has_reported:
+        # (Year) vol REP page   OR   [Year] vol REP page depending on series flag
+        year_brackets = f"[{m.year}]" if m.reporter_series_by_year else f"({m.year})"
+        reported_text = f"{year_brackets} {m.volume} {m.reporter} {m.first_page}"
+        reported_html = f"{escape_text(year_brackets)} {escape_text(m.volume)} {escape_text(m.reporter)} {escape_text(m.first_page)}"
 
-    if reported and not neutral:
-        core_plain = f"{case_name_plain} {reported}{pin_plain}"
-        core_html = f"{case_name_html} {reported_html}{pin_html}"
-        return (_ensure_trailing_full_stop(core_plain), _ensure_trailing_full_stop(core_html))
+    # Order and punctuation
+    core_text_parts: List[str] = [name_text]
+    core_html_parts: List[str] = [name_html]
 
-    # Both exist
-    if data.neutral_citation_first:
-        core_plain = f"{case_name_plain} {neutral}, {reported}{pin_plain}"
-        core_html = f"{case_name_html} {neutral_html}, {reported_html}{pin_html}"
+    if has_neutral and has_reported:
+        if m.neutral_citation_first:
+            core_text_parts.append(neutral_text + ";")
+            core_text_parts.append(reported_text)
+            core_html_parts.append(neutral_html + ";")
+            core_html_parts.append(reported_html)
+        else:
+            core_text_parts.append(reported_text + ";")
+            core_text_parts.append(neutral_text)
+            core_html_parts.append(reported_html + ";")
+            core_html_parts.append(neutral_html)
+    elif has_neutral:
+        core_text_parts.append(neutral_text)
+        core_html_parts.append(neutral_html)
+    elif has_reported:
+        core_text_parts.append(reported_text)
+        core_html_parts.append(reported_html)
+
+    # Pinpoint comes after citations, preceded by comma
+    if pin_text:
+        core_text_parts[-1] = core_text_parts[-1].rstrip(".")
+        core_html_parts[-1] = core_html_parts[-1].rstrip(".")
+        core_text_parts.append(f", {pin_text}")
+        core_html_parts.append(f", {pin_html}")
+
+    text = " ".join(core_text_parts).strip() + "."
+    html = " ".join(core_html_parts).strip() + "."
+
+    # Ensure " v " is correct (not v.)
+    text = normalise_v(text)
+    html = normalise_v(html)
+
+    return text, html
+
+
+def format_legislation(m: LegislationInput) -> Tuple[str, str]:
+    title = f"{m.title} {m.year}"
+    jur = f"({m.jurisdiction})"
+    title_text = title
+    title_html = f"<i>{escape_text(title)}</i>"
+
+    if m.is_bill:
+        title_text += " (Bill)"
+        title_html = f"<i>{escape_text(title)}</i> (Bill)"
+
+    provision = ""
+    if m.pinpoint_unit and m.pinpoint_number:
+        provision = f" {m.pinpoint_unit} {m.pinpoint_number}"
+
+    text = f"{title_text} {jur}{provision}."
+    html = f"{title_html} {escape_text(jur)}{escape_text(provision)}."
+    return text, html
+
+
+def format_journal_article(m: JournalArticleInput) -> Tuple[str, str]:
+    authors = join_authors(m.authors)
+    title = f"'{m.article_title}'"
+    year = f"[{m.year}]" if m.year_in_square_brackets else f"({m.year})"
+
+    vol_issue = ""
+    if m.volume and m.issue:
+        vol_issue = f"{m.volume}({m.issue})"
+    elif m.volume:
+        vol_issue = f"{m.volume}"
+    elif m.issue:
+        vol_issue = f"({m.issue})"
+
+    journal_html = f"<i>{escape_text(m.journal_title)}</i>"
+    journal_text = m.journal_title
+
+    base_text = f"{authors}, {title} {year} {vol_issue} {journal_text} {m.starting_page}".replace("  ", " ").strip()
+    base_html = f"{escape_text(authors)}, {escape_text(title)} {escape_text(year)} {escape_text(vol_issue)} {journal_html} {escape_text(m.starting_page)}".replace("  ", " ").strip()
+
+    if m.pinpoint:
+        p = normalise_pinpoint_value(m.pinpoint)
+        base_text += f", {p}"
+        base_html += f", {escape_text(p)}"
+
+    if m.is_online:
+        base_text += f" <{m.url}> accessed {m.access_date}"
+        base_html += f" &lt;{escape_text(m.url)}&gt; accessed {escape_text(m.access_date)}"
+
+    return base_text + ".", base_html + "."
+
+
+def format_book(m: BookInput) -> Tuple[str, str]:
+    authors = join_authors(m.authors)
+    title_html = f"<i>{escape_text(m.title)}</i>"
+    title_text = m.title
+
+    inner = [m.publisher]
+    if m.edition:
+        inner.append(m.edition)
+    inner.append(m.year)
+    paren = f"({', '.join(inner)})"
+
+    base_text = f"{authors}, {title_text} {paren}"
+    base_html = f"{escape_text(authors)}, {title_html} {escape_text(paren)}"
+
+    if m.pinpoint:
+        p = normalise_pinpoint_value(m.pinpoint)
+        base_text += f", {p}"
+        base_html += f", {escape_text(p)}"
+
+    return base_text + ".", base_html + "."
+
+
+def format_book_chapter(m: BookChapterInput) -> Tuple[str, str]:
+    chap_auth = join_authors(m.chapter_authors)
+    editors = join_editors(m.editors)
+    chapter_title = f"'{m.chapter_title}'"
+    book_title_html = f"<i>{escape_text(m.book_title)}</i>"
+    book_title_text = m.book_title
+
+    inner = [m.publisher]
+    if m.edition:
+        inner.append(m.edition)
+    inner.append(m.year)
+    paren = f"({', '.join(inner)})"
+
+    base_text = f"{chap_auth}, {chapter_title} in {editors} (ed), {book_title_text} {paren}".strip()
+    base_html = f"{escape_text(chap_auth)}, {escape_text(chapter_title)} in {escape_text(editors)} (ed), {book_title_html} {escape_text(paren)}".strip()
+
+    if m.starting_page:
+        base_text += f" {m.starting_page}"
+        base_html += f" {escape_text(m.starting_page)}"
+    if m.pinpoint:
+        p = normalise_pinpoint_value(m.pinpoint)
+        base_text += f", {p}"
+        base_html += f", {escape_text(p)}"
+
+    return base_text + ".", base_html + "."
+
+
+def format_media_article(m: MediaArticleInput) -> Tuple[str, str]:
+    author_part = ""
+    if m.org_as_author:
+        author_part = m.org_as_author
+    elif m.authors:
+        author_part = join_authors(m.authors)
+
+    title = f"'{m.article_title}'"
+    paper_html = f"<i>{escape_text(m.newspaper_title)}</i>"
+    paper_text = m.newspaper_title
+
+    parts_text = []
+    parts_html = []
+
+    if author_part:
+        parts_text.append(author_part + ",")
+        parts_html.append(escape_text(author_part) + ",")
+
+    parts_text.append(title)
+    parts_html.append(escape_text(title))
+
+    # Newspaper + city + date + page in parentheses
+    inner = [paper_text]
+    inner_html = [paper_html]
+    if m.city:
+        inner.append(m.city)
+        inner_html.append(escape_text(m.city))
+    inner.append(m.date)
+    inner_html.append(escape_text(m.date))
+    if m.page:
+        inner.append(m.page)
+        inner_html.append(escape_text(m.page))
+
+    paren_text = f"({', '.join(inner)})"
+    paren_html = "(" + ", ".join(inner_html) + ")"
+
+    parts_text.append(paren_text)
+    parts_html.append(paren_html)
+
+    base_text = " ".join(parts_text)
+    base_html = " ".join(parts_html)
+
+    if m.is_online:
+        base_text += f" <{m.url}> accessed {m.access_date}"
+        base_html += f" &lt;{escape_text(m.url)}&gt; accessed {escape_text(m.access_date)}"
+
+    return base_text + ".", base_html + "."
+
+
+def format_report(m: ReportInput) -> Tuple[str, str]:
+    author = m.author_or_org
+    title_html = f"<i>{escape_text(m.title)}</i>"
+    title_text = m.title
+
+    inner = []
+    if m.report_number_or_series:
+        inner.append(m.report_number_or_series)
+    if m.publisher:
+        inner.append(m.publisher)
+    if m.place:
+        inner.append(m.place)
+    if m.date:
+        inner.append(m.date)
+
+    paren = f"({', '.join(inner)})" if inner else ""
+
+    base_text = f"{author}, {title_text} {paren}".strip()
+    base_html = f"{escape_text(author)}, {title_html} {escape_text(paren)}".strip()
+
+    if m.pinpoint:
+        p = normalise_pinpoint_value(m.pinpoint)
+        base_text += f", {p}"
+        base_html += f", {escape_text(p)}"
+
+    if m.is_online:
+        base_text += f" <{m.url}> accessed {m.access_date}"
+        base_html += f" &lt;{escape_text(m.url)}&gt; accessed {escape_text(m.access_date)}"
+
+    return base_text + ".", base_html + "."
+
+
+def format_website(m: WebsiteInput) -> Tuple[str, str]:
+    # Deterministic. No guessing.
+    author = (m.author_or_org or "").strip()
+    title = f"'{m.page_title}'"
+    site = m.site_name
+
+    # AGLC often uses: Author, 'Title' (Site, Date) <URL>.
+    # If no date, use accessed.
+    if m.date:
+        paren = f"({site}, {m.date})"
     else:
-        core_plain = f"{case_name_plain} {reported}, {neutral}{pin_plain}"
-        core_html = f"{case_name_html} {reported_html}, {neutral_html}{pin_html}"
+        paren = f"({site})"
 
-    return (_ensure_trailing_full_stop(core_plain), _ensure_trailing_full_stop(core_html))
-
-
-def format_legislation(data: LegislationData, mode: str) -> Tuple[str, str]:
-    title = data.title.strip()
-    year = data.year.strip()
-    jur = norm_jurisdiction(data.jurisdiction) or data.jurisdiction.strip()
-
-    title_year = f"{title} {year}"
-    title_year_html = _ital(title_year)
-
-    core_plain = f"{title_year} ({jur})"
-    core_html = f"{title_year_html} ({jur})"
-
-    pu = _clean(data.pinpoint_unit)
-    pn = _clean(data.pinpoint_number)
-
-    if pu and pn:
-        pu2 = pu.strip()
-        core_plain += f" {pu2} {pn}"
-        core_html += f" {pu2} {pn}"
-
-    return (_ensure_trailing_full_stop(core_plain), _ensure_trailing_full_stop(core_html))
-
-
-def format_journal_article(data: JournalArticleData, mode: str) -> Tuple[str, str]:
-    # Authors
-    if mode == "bibliography":
-        authors_plain = format_authors_bibliography(data.authors)
-        authors_html = authors_plain
-    else:
-        authors_plain = format_authors_footnote(data.authors)
-        authors_html = authors_plain
-
-    article_title = _strip_outer_quotes(data.article_title)
-    journal_title = data.journal_title.strip()
-
-    year = data.year.strip()
-    vol = _clean(data.volume)
-    issue = _clean(data.issue)
-    start = data.starting_page.strip()
-    pin = _clean(data.pinpoint)
-
-    year_token = f"[{year}]" if data.year_in_square_brackets else f"({year})"
-    vol_token = f" {vol}" if vol else ""
-    issue_token = f"({issue})" if issue else ""
-    # AGLC common: (Year) Volume(Issue) Journal Page
-    journal_part_plain = f"{year_token}{vol_token}{issue_token} {journal_title} {start}".strip()
-    journal_part_html = f"{year_token}{vol_token}{issue_token} {_ital(journal_title)} {start}".strip()
-
-    core_plain = f"{authors_plain}, '{article_title}' {journal_part_plain}"
-    core_html = f"{authors_html}, '{article_title}' {journal_part_html}"
-
-    if pin:
-        core_plain += f", {pin}"
-        core_html += f", {pin}"
-
-    if data.is_online:
-        url = _clean(data.url)
-        access = _clean(data.access_date)
-        if not url or not access:
-            raise ValueError("Online journal article requires url and access_date.")
-        core_plain += f" <{url}> accessed {access}"
-        core_html += f" <{url}> accessed {access}"
-
-    return (_ensure_trailing_full_stop(core_plain), _ensure_trailing_full_stop(core_html))
-
-
-def format_book(data: BookData, mode: str) -> Tuple[str, str]:
-    if mode == "bibliography":
-        authors_plain = format_authors_bibliography(data.authors)
-        authors_html = authors_plain
-    else:
-        authors_plain = format_authors_footnote(data.authors)
-        authors_html = authors_plain
-
-    title = data.title.strip()
-    publisher = data.publisher.strip()
-    year = data.year.strip()
-    edition = _clean(data.edition)
-    pin = _clean(data.pinpoint)
-
-    paren_bits = [publisher]
-    if edition:
-        paren_bits.append(edition)
-    paren_bits.append(year)
-
-    paren = ", ".join(paren_bits)
-
-    core_plain = f"{authors_plain}, {title} ({paren})"
-    core_html = f"{authors_html}, {_ital(title)} ({paren})"
-
-    if pin:
-        core_plain += f" {pin}"
-        core_html += f" {pin}"
-
-    return (_ensure_trailing_full_stop(core_plain), _ensure_trailing_full_stop(core_html))
-
-
-def format_book_chapter(data: BookChapterData, mode: str) -> Tuple[str, str]:
-    if mode == "bibliography":
-        chap_auth_plain = format_authors_bibliography(data.chapter_authors)
-        eds_plain = format_authors_bibliography(data.editors)
-        chap_auth_html = chap_auth_plain
-        eds_html = eds_plain
-    else:
-        chap_auth_plain = format_authors_footnote(data.chapter_authors)
-        eds_plain = format_authors_footnote(data.editors)
-        chap_auth_html = chap_auth_plain
-        eds_html = eds_plain
-
-    chap_title = _strip_outer_quotes(data.chapter_title)
-    book_title = data.book_title.strip()
-    publisher = data.publisher.strip()
-    year = data.year.strip()
-    edition = _clean(data.edition)
-    start = _clean(data.starting_page)
-    pin = _clean(data.pinpoint)
-
-    paren_bits = [publisher]
-    if edition:
-        paren_bits.append(edition)
-    paren_bits.append(year)
-    paren = ", ".join(paren_bits)
-
-    start_bit_plain = f" {start}" if start else ""
-    start_bit_html = start_bit_plain
-
-    core_plain = f"{chap_auth_plain}, '{chap_title}' in {eds_plain} (ed), {book_title} ({paren}){start_bit_plain}"
-    core_html = f"{chap_auth_html}, '{chap_title}' in {eds_html} (ed), {_ital(book_title)} ({paren}){start_bit_html}"
-
-    if pin:
-        core_plain += f", {pin}"
-        core_html += f", {pin}"
-
-    return (_ensure_trailing_full_stop(core_plain), _ensure_trailing_full_stop(core_html))
-
-
-def format_media_article(data: MediaArticleData, mode: str) -> Tuple[str, str]:
-    # AGLC: Author, 'Title', Newspaper (City, Date) page.
-    authors = [a.strip() for a in (data.authors or []) if a and a.strip()]
-    org = _clean(data.org_as_author)
-
-    if org and authors:
-        # If both provided, prefer explicit authors
-        org = None
-
-    if org:
-        author_plain = org
-        author_html = org
-    else:
-        if not authors:
-            raise ValueError("Media article requires authors OR org_as_author.")
-        author_plain = format_authors_bibliography(authors) if mode == "bibliography" else format_authors_footnote(authors)
-        author_html = author_plain
-
-    title = _strip_outer_quotes(data.article_title)
-    paper = data.newspaper_title.strip()
-    city = _clean(data.city)
-    date = data.date.strip()
-    page = _clean(data.page)
-
-    paren_bits = []
-    if city:
-        paren_bits.append(city)
-    paren_bits.append(date)
-    paren = ", ".join(paren_bits)
-
-    core_plain = f"{author_plain}, '{title}', {paper} ({paren})"
-    core_html = f"{author_html}, '{title}', {_ital(paper)} ({paren})"
-
-    if page:
-        core_plain += f" {page}"
-        core_html += f" {page}"
-
-    if data.is_online:
-        url = _clean(data.url)
-        access = _clean(data.access_date)
-        if not url or not access:
-            raise ValueError("Online media article requires url and access_date.")
-        core_plain += f" <{url}> accessed {access}"
-        core_html += f" <{url}> accessed {access}"
-
-    return (_ensure_trailing_full_stop(core_plain), _ensure_trailing_full_stop(core_html))
-
-
-def format_report(data: ReportData, mode: str) -> Tuple[str, str]:
-    author = data.author_or_org.strip()
-    title = data.title.strip()
-    series = _clean(data.report_number_or_series)
-    publisher = _clean(data.publisher)
-    place = _clean(data.place)
-    date = _clean(data.date)
-    pin = _clean(data.pinpoint)
-
-    # Parenthetical: publisher, place, date (as available)
-    paren_bits: List[str] = []
-    if publisher:
-        paren_bits.append(publisher)
-    if place:
-        paren_bits.append(place)
-    if date:
-        paren_bits.append(date)
-
-    paren = ", ".join(paren_bits) if paren_bits else ""
-    series_bit = f", {series}" if series else ""
-    paren_bit = f" ({paren})" if paren else ""
-
-    core_plain = f"{author}, {title}{series_bit}{paren_bit}"
-    core_html = f"{author}, {_ital(title)}{series_bit}{paren_bit}"
-
-    if pin:
-        core_plain += f" {pin}"
-        core_html += f" {pin}"
-
-    if data.is_online:
-        url = _clean(data.url)
-        access = _clean(data.access_date)
-        if not url or not access:
-            raise ValueError("Online report requires url and access_date.")
-        core_plain += f" <{url}> accessed {access}"
-        core_html += f" <{url}> accessed {access}"
-
-    return (_ensure_trailing_full_stop(core_plain), _ensure_trailing_full_stop(core_html))
-
-
-def format_website(data: WebsiteData, mode: str) -> Tuple[str, str]:
-    author = _clean(data.author_or_org)
-    page_title = _strip_outer_quotes(data.page_title)
-    site = data.site_name.strip()
-    date = _clean(data.date)
-    url = data.url.strip()
-    access = data.access_date.strip()
+    base_text = ""
+    base_html = ""
 
     if author:
-        left_plain = f"{author}, '{page_title}'"
-        left_html = left_plain
+        base_text = f"{author}, {title} {paren} <{m.url}>"
+        base_html = f"{escape_text(author)}, {escape_text(title)} {escape_text(paren)} &lt;{escape_text(m.url)}&gt;"
     else:
-        left_plain = f"'{page_title}'"
-        left_html = left_plain
+        base_text = f"{title} {paren} <{m.url}>"
+        base_html = f"{escape_text(title)} {escape_text(paren)} &lt;{escape_text(m.url)}&gt;"
 
-    if date:
-        core_plain = f"{left_plain} ({site}, {date}) <{url}> accessed {access}"
-        core_html = f"{left_html} ({site}, {date}) <{url}> accessed {access}"
+    if not m.date:
+        base_text += f" accessed {m.access_date}"
+        base_html += f" accessed {escape_text(m.access_date)}"
+
+    return base_text + ".", base_html + "."
+
+
+# -----------------------------
+# Freeform formatters (paste)
+# -----------------------------
+
+_NEUTRAL_RE = re.compile(r"(?P<year>\d{4})\]?\s+(?P<court>[A-Za-z]{2,8})\s+(?P<num>\d{1,4})")
+_REPORTED_RE = re.compile(r"\((?P<year>\d{4})\)\s+(?P<vol>\d+)\s+(?P<rep>[A-Za-z\.]+)\s+(?P<page>\d+)", re.I)
+_PINPARA_RE = re.compile(r"\[(?P<p>\d{1,5})\]\s*$")
+_PINPAGE_RE = re.compile(r"\b(?P<p>\d{1,5})\s*$")
+
+
+def format_case_freeform(raw: str) -> PasteEntry:
+    s = raw.strip()
+    errs: List[str] = []
+    meta: Dict[str, Any] = {}
+
+    # Case name (before first citation token)
+    # Try split on " [" or " (" that starts citation
+    split = re.split(r"\s+(?=\[\d{4}\]|\(\d{4}\))", s, maxsplit=1)
+    case_name = split[0].strip()
+    rest = split[1].strip() if len(split) > 1 else ""
+
+    if not case_name or " v " not in case_name.lower():
+        errs.append("Could not confidently identify a case name. Use Build mode for best results.")
+        case_name = case_name or s
+
+    case_name = normalise_case_name(case_name)
+
+    # Detect pinpoints at end (prefer paragraph [x])
+    pin_text = ""
+    pin_html = ""
+    mpara = _PINPARA_RE.search(s)
+    if mpara:
+        val = mpara.group("p")
+        pin_text = f"[{val}]"
+        pin_html = f"[{escape_text(val)}]"
+        # Remove it from rest parsing
+        s_wo = s[: mpara.start()].strip()
     else:
-        core_plain = f"{left_plain} ({site}) <{url}> accessed {access}"
-        core_html = f"{left_html} ({site}) <{url}> accessed {access}"
+        s_wo = s
 
-    return (_ensure_trailing_full_stop(core_plain), _ensure_trailing_full_stop(core_html))
+    # Neutral
+    neutral = ""
+    m_neu = re.search(r"\[(\d{4})\]\s+([A-Za-z]{2,8})\s+(\d{1,4})", s_wo)
+    if m_neu:
+        y = m_neu.group(1)
+        court = normalise_court(m_neu.group(2))
+        num = m_neu.group(3)
+        neutral = f"[{y}] {court} {num}"
+        meta["neutral"] = neutral
 
+    # Reported
+    reported = ""
+    m_rep = _REPORTED_RE.search(s_wo)
+    if m_rep:
+        y = m_rep.group("year")
+        vol = m_rep.group("vol")
+        rep = normalise_reporter(m_rep.group("rep"))
+        page = m_rep.group("page")
+        reported = f"({y}) {vol} {rep} {page}"
+        meta["reported"] = reported
 
-# -------------------------------------------------------------------
-# Main dispatcher
-# -------------------------------------------------------------------
+    if not neutral and not reported:
+        errs.append("Missing a recognised neutral citation or reported citation. Use Build mode for this case.")
+        out_text = f"{case_name}."
+        out_html = f"<i>{escape_text(case_name)}</i>."
+        return PasteEntry(raw=raw, source_type="CASE", text=out_text, html=out_html, validated=False, validation_errors=errs, meta=meta)
 
-def format_citation(source_type: SourceType | str, data: Dict[str, Any], mode: str = "footnote") -> CitationResult:
-    if isinstance(source_type, str):
-        try:
-            st = SourceType(source_type)
-        except Exception:
-            raise ValueError(f"Unsupported source_type: {source_type}")
+    # Join with correct punctuation
+    name_html = f"<i>{escape_text(case_name)}</i>"
+    parts_text = [case_name]
+    parts_html = [name_html]
+
+    if neutral and reported:
+        parts_text.append(neutral + ";")
+        parts_text.append(reported)
+        parts_html.append(escape_text(neutral) + ";")
+        parts_html.append(escape_text(reported))
+    elif neutral:
+        parts_text.append(neutral)
+        parts_html.append(escape_text(neutral))
     else:
-        st = source_type
+        parts_text.append(reported)
+        parts_html.append(escape_text(reported))
 
-    m = (mode or "footnote").strip().lower()
-    if m not in {"footnote", "bibliography"}:
-        raise ValueError("mode must be 'footnote' or 'bibliography'")
+    # Pinpoint (comma)
+    if pin_text:
+        parts_text.append(f", {pin_text}")
+        parts_html.append(f", {pin_html}")
 
-    if st == SourceType.case:
-        model = CaseData(**data)
-        text, html = format_case(model, m)
-    elif st == SourceType.legislation:
-        model = LegislationData(**data)
-        # normalise jurisdiction safely
-        model.jurisdiction = norm_jurisdiction(model.jurisdiction) or model.jurisdiction
-        text, html = format_legislation(model, m)
-    elif st == SourceType.journal_article:
-        model = JournalArticleData(**data)
-        text, html = format_journal_article(model, m)
-    elif st == SourceType.book:
-        model = BookData(**data)
-        text, html = format_book(model, m)
-    elif st == SourceType.book_chapter:
-        model = BookChapterData(**data)
-        text, html = format_book_chapter(model, m)
-    elif st == SourceType.media_article:
-        model = MediaArticleData(**data)
-        text, html = format_media_article(model, m)
-    elif st == SourceType.report:
-        model = ReportData(**data)
-        text, html = format_report(model, m)
-    elif st == SourceType.website:
-        model = WebsiteData(**data)
-        text, html = format_website(model, m)
-    else:
-        raise ValueError(f"Unsupported source_type: {st}")
+    out_text = normalise_v(" ".join(parts_text).strip()) + "."
+    out_html = normalise_v(" ".join(parts_html).strip()) + "."
 
-    return CitationResult(source_type=st, mode=m, text=text, html=html)
+    validated = len(errs) == 0
+    return PasteEntry(raw=raw, source_type="CASE", text=out_text, html=out_html, validated=validated, validation_errors=errs, meta=meta)
+
+
+def format_legislation_freeform(raw: str) -> PasteEntry:
+    s = raw.strip()
+    errs: List[str] = []
+    meta: Dict[str, Any] = {}
+
+    m = re.search(
+        r"^(?P<title>.+?)\s+(?P<year>\d{4})\s*\(\s*(?P<jur>[A-Za-z]{2,6})\s*\)\s*(?P<prov>.*)?$",
+        s,
+    )
+    if not m:
+        # Try without brackets
+        m = re.search(
+            r"^(?P<title>.+?)\s+(?P<year>\d{4})\s+(?P<jur>[A-Za-z]{2,6})\s*(?P<prov>.*)?$",
+            s,
+        )
+
+    if not m:
+        errs.append("Could not parse legislation reliably. Use Build mode.")
+        return PasteEntry(raw=raw, source_type="LEGISLATION", text=s, html=escape_text(s), validated=False, validation_errors=errs, meta=meta)
+
+    title = normalise_titlecase(m.group("title").strip())
+    year = m.group("year").strip()
+    jur = normalise_jurisdiction(m.group("jur").strip())
+    prov = (m.group("prov") or "").strip()
+    prov = normalise_leg_provision(prov)
+
+    core_text = f"{title} {year} ({jur})".strip()
+    core_html = f"<i>{escape_text(f'{title} {year}')}</i> {escape_text(f'({jur})')}"
+
+    if prov:
+        core_text += f" {prov}"
+        core_html += f" {escape_text(prov)}"
+
+    out_text = core_text + "."
+    out_html = core_html + "."
+    meta.update({"title": title, "year": year, "jurisdiction": jur, "provision": prov})
+
+    return PasteEntry(raw=raw, source_type="LEGISLATION", text=out_text, html=out_html, validated=True, validation_errors=[], meta=meta)
+
+
+def format_journal_freeform(raw: str) -> PasteEntry:
+    s = raw.strip()
+    errs: List[str] = []
+    meta: Dict[str, Any] = {}
+
+    m = re.search(
+        r"^(?P<author>[^,]+(?:, [^,]+)*),\s*'(?P<title>[^']+)'\s*\((?P<year>\d{4})\)\s*(?P<vol>\d+)\((?P<issue>\d+)\)\s+(?P<journal>.+?)\s+(?P<page>\d+)(?:,\s*(?P<pin>\d+))?$",
+        s,
+    )
+    if not m:
+        errs.append("Could not parse journal article reliably. Use Build mode.")
+        return PasteEntry(raw=raw, source_type="JOURNAL", text=s, html=escape_text(s), validated=False, validation_errors=errs, meta=meta)
+
+    author = normalise_person_name(m.group("author").strip())
+    title = normalise_titlecase(m.group("title").strip())
+    year = m.group("year")
+    vol = m.group("vol")
+    issue = m.group("issue")
+    journal = normalise_titlecase(m.group("journal").strip())
+    page = m.group("page")
+    pin = m.group("pin")
+
+    out_text = f"{author}, '{title}' ({year}) {vol}({issue}) {journal} {page}"
+    out_html = f"{escape_text(author)}, '{escape_text(title)}' ({escape_text(year)}) {escape_text(vol)}({escape_text(issue)}) <i>{escape_text(journal)}</i> {escape_text(page)}"
+
+    if pin:
+        out_text += f", {pin}"
+        out_html += f", {escape_text(pin)}"
+
+    return PasteEntry(raw=raw, source_type="JOURNAL", text=out_text + ".", html=out_html + ".", validated=True, validation_errors=[], meta=meta)
+
+
+def format_book_freeform(raw: str) -> PasteEntry:
+    s = raw.strip()
+    errs: List[str] = []
+    meta: Dict[str, Any] = {}
+
+    m = re.search(
+        r"^(?P<author>.+?),\s*(?P<title>.+?)\s*\((?P<publisher>[^,]+),\s*(?P<edition>[^,]+),\s*(?P<year>\d{4})\)(?:,\s*(?P<pin>\d+))?$",
+        s,
+    )
+    if not m:
+        errs.append("Could not parse book reliably. Use Build mode.")
+        return PasteEntry(raw=raw, source_type="BOOK", text=s, html=escape_text(s), validated=False, validation_errors=errs, meta=meta)
+
+    author = normalise_person_name(m.group("author").strip())
+    title = normalise_titlecase(m.group("title").strip())
+    publisher = m.group("publisher").strip()
+    edition = m.group("edition").strip()
+    year = m.group("year").strip()
+    pin = m.group("pin")
+
+    paren = f"({publisher}, {edition}, {year})"
+    out_text = f"{author}, {title} {paren}"
+    out_html = f"{escape_text(author)}, <i>{escape_text(title)}</i> {escape_text(paren)}"
+
+    if pin:
+        out_text += f", {pin}"
+        out_html += f", {escape_text(pin)}"
+
+    return PasteEntry(raw=raw, source_type="BOOK", text=out_text + ".", html=out_html + ".", validated=True, validation_errors=[], meta=meta)
+
+
+def format_website_freeform(raw: str) -> PasteEntry:
+    # No LLM. No guessing. We only format if the user already provided something close.
+    s = raw.strip()
+    errs: List[str] = []
+    meta: Dict[str, Any] = {}
+
+    url = extract_url(s)
+    if not url:
+        errs.append("Website line missing URL. Include https://... or <https://...>.")
+        return PasteEntry(raw=raw, source_type="WEBSITE", text=s, html=escape_text(s), validated=False, validation_errors=errs, meta=meta)
+
+    # If user provided a near-complete format: Author, 'Title' (Publisher, Date) <URL>
+    # We will only tidy spacing and enforce <...> plus trailing period.
+    # Otherwise mark needs review.
+    has_quotes = bool(re.search(r"'[^']+'", s))
+    has_paren = "(" in s and ")" in s
+
+    if not (has_quotes and has_paren):
+        errs.append("Paste mode cannot reliably build website metadata. Use Build mode for websites.")
+        # Still return a minimally normalised line
+        out = ensure_angle_brackets(s, url)
+        out = out.rstrip(".") + "."
+        return PasteEntry(raw=raw, source_type="WEBSITE", text=strip_tags(out), html=escape_text(out), validated=False, validation_errors=errs, meta={"url": url})
+
+    out = ensure_angle_brackets(s, url).rstrip(".") + "."
+    return PasteEntry(raw=raw, source_type="WEBSITE", text=strip_tags(out), html=escape_text(out), validated=True, validation_errors=[], meta={"url": url})
+
+
+# -----------------------------
+# Normalisation helpers
+# -----------------------------
+
+def normalise_v(s: str) -> str:
+    # Replace " v. " with " v "
+    return re.sub(r"\sv\.\s", " v ", s, flags=re.I)
+
+
+def normalise_reporter(rep: str) -> str:
+    rep = (rep or "").strip().upper().replace(".", "")
+    return rep
+
+
+def normalise_court(court: str) -> str:
+    return (court or "").strip().upper()
+
+
+def normalise_jurisdiction(j: str) -> str:
+    j0 = (j or "").strip()
+    if not j0:
+        return j0
+    mapping = {
+        "CTH": "Cth",
+        "NSW": "NSW",
+        "VIC": "Vic",
+        "QLD": "Qld",
+        "SA": "SA",
+        "WA": "WA",
+        "TAS": "Tas",
+        "ACT": "ACT",
+        "NT": "NT",
+    }
+    up = j0.upper()
+    return mapping.get(up, j0)
+
+
+def normalise_person_name(name: str) -> str:
+    # Light touch: collapse whitespace, titlecase if mostly lower
+    s = " ".join((name or "").split())
+    if not s:
+        return s
+    if looks_mostly_lower(s):
+        return s.title()
+    return s
+
+
+def normalise_titlecase(text: str) -> str:
+    s = " ".join((text or "").split())
+    if not s:
+        return s
+    if looks_mostly_lower(s):
+        return s.title()
+    return s
+
+
+def normalise_case_name(case_name: str) -> str:
+    s = " ".join((case_name or "").split())
+    if not s:
+        return s
+
+    # Force " v " and remove v.
+    s = re.sub(r"\sv\.\s", " v ", s, flags=re.I)
+
+    if looks_mostly_lower(s):
+        # Title-case words, then fix common tokens
+        s = s.title()
+
+    # Fix " V " to " v "
+    s = re.sub(r"\sV\s", " v ", s)
+
+    # Preserve (No 2) style: Title() will create (No 2) fine.
+    return s
+
+
+def looks_mostly_lower(s: str) -> bool:
+    letters = [c for c in s if c.isalpha()]
+    if not letters:
+        return False
+    lower = sum(1 for c in letters if c.islower())
+    return (lower / max(1, len(letters))) > 0.75
+
+
+def normalise_pinpoint_value(p: str) -> str:
+    return re.sub(r"[^\d]", "", (p or "").strip()) or (p or "").strip()
+
+
+def normalise_leg_provision(prov: str) -> str:
+    if not prov:
+        return ""
+    s = " ".join(prov.split())
+    # Normalise common "s" tokens
+    s = re.sub(r"\bsec\b", "s", s, flags=re.I)
+    s = re.sub(r"\bsecs\b", "ss", s, flags=re.I)
+    s = re.sub(r"\bsection\b", "s", s, flags=re.I)
+    s = re.sub(r"\bsections\b", "ss", s, flags=re.I)
+    return s
+
+
+def join_authors(authors: List[str]) -> str:
+    a = [x.strip() for x in authors if x and x.strip()]
+    if not a:
+        return ""
+    if len(a) == 1:
+        return a[0]
+    if len(a) == 2:
+        return f"{a[0]} and {a[1]}"
+    return ", ".join(a[:-1]) + f", and {a[-1]}"
+
+
+def join_editors(editors: List[str]) -> str:
+    e = [x.strip() for x in editors if x and x.strip()]
+    if not e:
+        return ""
+    if len(e) == 1:
+        return e[0]
+    if len(e) == 2:
+        return f"{e[0]} and {e[1]}"
+    return ", ".join(e[:-1]) + f", and {e[-1]}"
+
+
+def extract_url(text: str) -> Optional[str]:
+    m = re.search(r"<(https?://[^>]+)>", text)
+    if m:
+        return m.group(1).strip()
+    m2 = re.search(r"(https?://\S+)", text)
+    if m2:
+        return m2.group(1).rstrip(").,;")
+    return None
+
+
+def ensure_angle_brackets(text: str, url: str) -> str:
+    # Ensure URL is in <...>
+    if f"<{url}>" in text:
+        return text
+    # Replace naked url with <url>
+    return re.sub(re.escape(url), f"<{url}>", text)
+
+
+def strip_tags(s: str) -> str:
+    return re.sub(r"<[^>]+>", "", s)
+
+
+def escape_text(s: str) -> str:
+    # Escape for safe HTML output. We only generate <i> in controlled places.
+    s = s or ""
+    s = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return s
