@@ -1,6 +1,13 @@
 # aglc_engine.py
 # Lexcite AGLC4 formatting engine (deterministic, HTML italics support)
-# Version: 2.0.0
+# Version: 2.1.0 (whitespace + punctuation normalisation, safer joins)
+#
+# Key upgrade: a single, central cleaner that removes accidental extra spaces
+# everywhere (text + html), including edge cases like:
+#  - double spaces introduced by optional fields
+#  - spaces before punctuation (",", ".", ")", "]")
+#  - spaces after opening brackets ("(", "[")
+#  - " ;" / " ," style artifacts from join logic
 
 from __future__ import annotations
 
@@ -9,7 +16,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 
 # -----------------------------
@@ -41,6 +48,10 @@ def format_citation(
     data: Dict[str, Any],
     mode: str = "footnote",
 ) -> CitationResult:
+    """
+    Deterministic formatter. Returns both plain text and HTML (with controlled <i> tags).
+    Always runs the final output through a strict cleaner that normalises whitespace and punctuation.
+    """
     st = SourceType(str(source_type))
     mode = (mode or "footnote").strip().lower()
     if mode not in ("footnote", "bibliography"):
@@ -88,6 +99,7 @@ def format_citation(
 
     # Fallback
     raw = str(data.get("raw") or "").strip()
+    raw = clean_text_output(raw)
     return CitationResult(source_type=SourceType.other, mode=mode, text=raw, html=escape_text(raw))
 
 
@@ -113,31 +125,27 @@ def format_freeform_line(raw: str) -> PasteEntry:
     st = detect_source_type_freeform(s)
 
     if st == SourceType.case:
-        entry = format_case_freeform(s)
-        return entry
+        return format_case_freeform(s)
 
     if st == SourceType.legislation:
-        entry = format_legislation_freeform(s)
-        return entry
+        return format_legislation_freeform(s)
 
     if st == SourceType.journal_article:
-        entry = format_journal_freeform(s)
-        return entry
+        return format_journal_freeform(s)
 
     if st == SourceType.book:
-        entry = format_book_freeform(s)
-        return entry
+        return format_book_freeform(s)
 
     if st == SourceType.website:
-        entry = format_website_freeform(s)
-        return entry
+        return format_website_freeform(s)
 
     # Unknown
+    txt = clean_text_output(s)
     return PasteEntry(
         raw=s,
         source_type="OTHER",
-        text=s,
-        html=escape_text(s),
+        text=txt,
+        html=escape_text(txt),
         validated=False,
         validation_errors=["Unsupported or unrecognised source pattern in paste mode. Use Build mode for reliability."],
         meta={},
@@ -197,7 +205,6 @@ class CaseInput(BaseModel):
 
     @model_validator(mode="after")
     def _check_case(self):
-        # Normalise
         self.case_name = normalise_case_name(self.case_name)
 
         if self.reporter:
@@ -206,7 +213,6 @@ class CaseInput(BaseModel):
         if self.court:
             self.court = normalise_court(self.court)
 
-        # Require at least one citation form
         has_neutral = bool(self.court and self.decision_number)
         has_reported = bool(self.volume and self.reporter and self.first_page)
 
@@ -214,9 +220,10 @@ class CaseInput(BaseModel):
             raise ValueError("Unreported cases require a neutral citation (court and decision number).")
 
         if not has_neutral and not has_reported:
-            raise ValueError("Provide either a neutral citation (court + decision number) or a reported citation (volume + reporter + first page).")
+            raise ValueError(
+                "Provide either a neutral citation (court + decision number) or a reported citation (volume + reporter + first page)."
+            )
 
-        # Pinpoint validity
         if self.pinpoint_type:
             pt = self.pinpoint_type.strip().lower()
             if pt not in ("page", "paragraph"):
@@ -406,14 +413,12 @@ class WebsiteInput(BaseModel):
 # -----------------------------
 
 def format_case(m: CaseInput) -> Tuple[str, str]:
-    # Case name always italic
     name_html = f"<i>{escape_text(m.case_name)}</i>"
     name_text = m.case_name
 
     has_neutral = bool(m.court and m.decision_number)
     has_reported = bool(m.volume and m.reporter and m.first_page)
 
-    # Pinpoint formatting
     pin_text = ""
     pin_html = ""
     if m.pinpoint_type and m.pinpoint:
@@ -426,7 +431,6 @@ def format_case(m: CaseInput) -> Tuple[str, str]:
             pin_text = f"{val}"
             pin_html = escape_text(val)
 
-    # Compose parts
     neutral_text = ""
     neutral_html = ""
     if has_neutral:
@@ -436,12 +440,10 @@ def format_case(m: CaseInput) -> Tuple[str, str]:
     reported_text = ""
     reported_html = ""
     if has_reported:
-        # (Year) vol REP page   OR   [Year] vol REP page depending on series flag
         year_brackets = f"[{m.year}]" if m.reporter_series_by_year else f"({m.year})"
         reported_text = f"{year_brackets} {m.volume} {m.reporter} {m.first_page}"
         reported_html = f"{escape_text(year_brackets)} {escape_text(m.volume)} {escape_text(m.reporter)} {escape_text(m.first_page)}"
 
-    # Order and punctuation
     core_text_parts: List[str] = [name_text]
     core_html_parts: List[str] = [name_html]
 
@@ -463,7 +465,6 @@ def format_case(m: CaseInput) -> Tuple[str, str]:
         core_text_parts.append(reported_text)
         core_html_parts.append(reported_html)
 
-    # Pinpoint comes after citations, preceded by comma
     if pin_text:
         core_text_parts[-1] = core_text_parts[-1].rstrip(".")
         core_html_parts[-1] = core_html_parts[-1].rstrip(".")
@@ -473,11 +474,10 @@ def format_case(m: CaseInput) -> Tuple[str, str]:
     text = " ".join(core_text_parts).strip() + "."
     html = " ".join(core_html_parts).strip() + "."
 
-    # Ensure " v " is correct (not v.)
     text = normalise_v(text)
     html = normalise_v(html)
 
-    return text, html
+    return clean_text_output(text), clean_html_output(html)
 
 
 def format_legislation(m: LegislationInput) -> Tuple[str, str]:
@@ -496,7 +496,7 @@ def format_legislation(m: LegislationInput) -> Tuple[str, str]:
 
     text = f"{title_text} {jur}{provision}."
     html = f"{title_html} {escape_text(jur)}{escape_text(provision)}."
-    return text, html
+    return clean_text_output(text), clean_html_output(html)
 
 
 def format_journal_article(m: JournalArticleInput) -> Tuple[str, str]:
@@ -527,7 +527,7 @@ def format_journal_article(m: JournalArticleInput) -> Tuple[str, str]:
         base_text += f" <{m.url}> accessed {m.access_date}"
         base_html += f" &lt;{escape_text(m.url)}&gt; accessed {escape_text(m.access_date)}"
 
-    return base_text + ".", base_html + "."
+    return clean_text_output(base_text + "."), clean_html_output(base_html + ".")
 
 
 def format_book(m: BookInput) -> Tuple[str, str]:
@@ -549,7 +549,7 @@ def format_book(m: BookInput) -> Tuple[str, str]:
         base_text += f", {p}"
         base_html += f", {escape_text(p)}"
 
-    return base_text + ".", base_html + "."
+    return clean_text_output(base_text + "."), clean_html_output(base_html + ".")
 
 
 def format_book_chapter(m: BookChapterInput) -> Tuple[str, str]:
@@ -576,7 +576,7 @@ def format_book_chapter(m: BookChapterInput) -> Tuple[str, str]:
         base_text += f", {p}"
         base_html += f", {escape_text(p)}"
 
-    return base_text + ".", base_html + "."
+    return clean_text_output(base_text + "."), clean_html_output(base_html + ".")
 
 
 def format_media_article(m: MediaArticleInput) -> Tuple[str, str]:
@@ -590,8 +590,8 @@ def format_media_article(m: MediaArticleInput) -> Tuple[str, str]:
     paper_html = f"<i>{escape_text(m.newspaper_title)}</i>"
     paper_text = m.newspaper_title
 
-    parts_text = []
-    parts_html = []
+    parts_text: List[str] = []
+    parts_html: List[str] = []
 
     if author_part:
         parts_text.append(author_part + ",")
@@ -600,7 +600,6 @@ def format_media_article(m: MediaArticleInput) -> Tuple[str, str]:
     parts_text.append(title)
     parts_html.append(escape_text(title))
 
-    # Newspaper + city + date + page in parentheses
     inner = [paper_text]
     inner_html = [paper_html]
     if m.city:
@@ -625,7 +624,7 @@ def format_media_article(m: MediaArticleInput) -> Tuple[str, str]:
         base_text += f" <{m.url}> accessed {m.access_date}"
         base_html += f" &lt;{escape_text(m.url)}&gt; accessed {escape_text(m.access_date)}"
 
-    return base_text + ".", base_html + "."
+    return clean_text_output(base_text + "."), clean_html_output(base_html + ".")
 
 
 def format_report(m: ReportInput) -> Tuple[str, str]:
@@ -633,7 +632,7 @@ def format_report(m: ReportInput) -> Tuple[str, str]:
     title_html = f"<i>{escape_text(m.title)}</i>"
     title_text = m.title
 
-    inner = []
+    inner: List[str] = []
     if m.report_number_or_series:
         inner.append(m.report_number_or_series)
     if m.publisher:
@@ -657,24 +656,18 @@ def format_report(m: ReportInput) -> Tuple[str, str]:
         base_text += f" <{m.url}> accessed {m.access_date}"
         base_html += f" &lt;{escape_text(m.url)}&gt; accessed {escape_text(m.access_date)}"
 
-    return base_text + ".", base_html + "."
+    return clean_text_output(base_text + "."), clean_html_output(base_html + ".")
 
 
 def format_website(m: WebsiteInput) -> Tuple[str, str]:
-    # Deterministic. No guessing.
     author = (m.author_or_org or "").strip()
     title = f"'{m.page_title}'"
     site = m.site_name
 
-    # AGLC often uses: Author, 'Title' (Site, Date) <URL>.
-    # If no date, use accessed.
     if m.date:
         paren = f"({site}, {m.date})"
     else:
         paren = f"({site})"
-
-    base_text = ""
-    base_html = ""
 
     if author:
         base_text = f"{author}, {title} {paren} <{m.url}>"
@@ -687,7 +680,7 @@ def format_website(m: WebsiteInput) -> Tuple[str, str]:
         base_text += f" accessed {m.access_date}"
         base_html += f" accessed {escape_text(m.access_date)}"
 
-    return base_text + ".", base_html + "."
+    return clean_text_output(base_text + "."), clean_html_output(base_html + ".")
 
 
 # -----------------------------
@@ -705,8 +698,6 @@ def format_case_freeform(raw: str) -> PasteEntry:
     errs: List[str] = []
     meta: Dict[str, Any] = {}
 
-    # Case name (before first citation token)
-    # Try split on " [" or " (" that starts citation
     split = re.split(r"\s+(?=\[\d{4}\]|\(\d{4}\))", s, maxsplit=1)
     case_name = split[0].strip()
     rest = split[1].strip() if len(split) > 1 else ""
@@ -717,7 +708,6 @@ def format_case_freeform(raw: str) -> PasteEntry:
 
     case_name = normalise_case_name(case_name)
 
-    # Detect pinpoints at end (prefer paragraph [x])
     pin_text = ""
     pin_html = ""
     mpara = _PINPARA_RE.search(s)
@@ -725,12 +715,10 @@ def format_case_freeform(raw: str) -> PasteEntry:
         val = mpara.group("p")
         pin_text = f"[{val}]"
         pin_html = f"[{escape_text(val)}]"
-        # Remove it from rest parsing
         s_wo = s[: mpara.start()].strip()
     else:
         s_wo = s
 
-    # Neutral
     neutral = ""
     m_neu = re.search(r"\[(\d{4})\]\s+([A-Za-z]{2,8})\s+(\d{1,4})", s_wo)
     if m_neu:
@@ -740,7 +728,6 @@ def format_case_freeform(raw: str) -> PasteEntry:
         neutral = f"[{y}] {court} {num}"
         meta["neutral"] = neutral
 
-    # Reported
     reported = ""
     m_rep = _REPORTED_RE.search(s_wo)
     if m_rep:
@@ -755,9 +742,8 @@ def format_case_freeform(raw: str) -> PasteEntry:
         errs.append("Missing a recognised neutral citation or reported citation. Use Build mode for this case.")
         out_text = f"{case_name}."
         out_html = f"<i>{escape_text(case_name)}</i>."
-        return PasteEntry(raw=raw, source_type="CASE", text=out_text, html=out_html, validated=False, validation_errors=errs, meta=meta)
+        return PasteEntry(raw=raw, source_type="CASE", text=clean_text_output(out_text), html=clean_html_output(out_html), validated=False, validation_errors=errs, meta=meta)
 
-    # Join with correct punctuation
     name_html = f"<i>{escape_text(case_name)}</i>"
     parts_text = [case_name]
     parts_html = [name_html]
@@ -774,7 +760,6 @@ def format_case_freeform(raw: str) -> PasteEntry:
         parts_text.append(reported)
         parts_html.append(escape_text(reported))
 
-    # Pinpoint (comma)
     if pin_text:
         parts_text.append(f", {pin_text}")
         parts_html.append(f", {pin_html}")
@@ -783,7 +768,15 @@ def format_case_freeform(raw: str) -> PasteEntry:
     out_html = normalise_v(" ".join(parts_html).strip()) + "."
 
     validated = len(errs) == 0
-    return PasteEntry(raw=raw, source_type="CASE", text=out_text, html=out_html, validated=validated, validation_errors=errs, meta=meta)
+    return PasteEntry(
+        raw=raw,
+        source_type="CASE",
+        text=clean_text_output(out_text),
+        html=clean_html_output(out_html),
+        validated=validated,
+        validation_errors=errs,
+        meta=meta,
+    )
 
 
 def format_legislation_freeform(raw: str) -> PasteEntry:
@@ -796,7 +789,6 @@ def format_legislation_freeform(raw: str) -> PasteEntry:
         s,
     )
     if not m:
-        # Try without brackets
         m = re.search(
             r"^(?P<title>.+?)\s+(?P<year>\d{4})\s+(?P<jur>[A-Za-z]{2,6})\s*(?P<prov>.*)?$",
             s,
@@ -804,7 +796,7 @@ def format_legislation_freeform(raw: str) -> PasteEntry:
 
     if not m:
         errs.append("Could not parse legislation reliably. Use Build mode.")
-        return PasteEntry(raw=raw, source_type="LEGISLATION", text=s, html=escape_text(s), validated=False, validation_errors=errs, meta=meta)
+        return PasteEntry(raw=raw, source_type="LEGISLATION", text=clean_text_output(s), html=clean_html_output(escape_text(s)), validated=False, validation_errors=errs, meta=meta)
 
     title = normalise_titlecase(m.group("title").strip())
     year = m.group("year").strip()
@@ -823,7 +815,7 @@ def format_legislation_freeform(raw: str) -> PasteEntry:
     out_html = core_html + "."
     meta.update({"title": title, "year": year, "jurisdiction": jur, "provision": prov})
 
-    return PasteEntry(raw=raw, source_type="LEGISLATION", text=out_text, html=out_html, validated=True, validation_errors=[], meta=meta)
+    return PasteEntry(raw=raw, source_type="LEGISLATION", text=clean_text_output(out_text), html=clean_html_output(out_html), validated=True, validation_errors=[], meta=meta)
 
 
 def format_journal_freeform(raw: str) -> PasteEntry:
@@ -837,7 +829,7 @@ def format_journal_freeform(raw: str) -> PasteEntry:
     )
     if not m:
         errs.append("Could not parse journal article reliably. Use Build mode.")
-        return PasteEntry(raw=raw, source_type="JOURNAL", text=s, html=escape_text(s), validated=False, validation_errors=errs, meta=meta)
+        return PasteEntry(raw=raw, source_type="JOURNAL", text=clean_text_output(s), html=clean_html_output(escape_text(s)), validated=False, validation_errors=errs, meta=meta)
 
     author = normalise_person_name(m.group("author").strip())
     title = normalise_titlecase(m.group("title").strip())
@@ -855,7 +847,7 @@ def format_journal_freeform(raw: str) -> PasteEntry:
         out_text += f", {pin}"
         out_html += f", {escape_text(pin)}"
 
-    return PasteEntry(raw=raw, source_type="JOURNAL", text=out_text + ".", html=out_html + ".", validated=True, validation_errors=[], meta=meta)
+    return PasteEntry(raw=raw, source_type="JOURNAL", text=clean_text_output(out_text + "."), html=clean_html_output(out_html + "."), validated=True, validation_errors=[], meta=meta)
 
 
 def format_book_freeform(raw: str) -> PasteEntry:
@@ -869,7 +861,7 @@ def format_book_freeform(raw: str) -> PasteEntry:
     )
     if not m:
         errs.append("Could not parse book reliably. Use Build mode.")
-        return PasteEntry(raw=raw, source_type="BOOK", text=s, html=escape_text(s), validated=False, validation_errors=errs, meta=meta)
+        return PasteEntry(raw=raw, source_type="BOOK", text=clean_text_output(s), html=clean_html_output(escape_text(s)), validated=False, validation_errors=errs, meta=meta)
 
     author = normalise_person_name(m.group("author").strip())
     title = normalise_titlecase(m.group("title").strip())
@@ -886,11 +878,10 @@ def format_book_freeform(raw: str) -> PasteEntry:
         out_text += f", {pin}"
         out_html += f", {escape_text(pin)}"
 
-    return PasteEntry(raw=raw, source_type="BOOK", text=out_text + ".", html=out_html + ".", validated=True, validation_errors=[], meta=meta)
+    return PasteEntry(raw=raw, source_type="BOOK", text=clean_text_output(out_text + "."), html=clean_html_output(out_html + "."), validated=True, validation_errors=[], meta=meta)
 
 
 def format_website_freeform(raw: str) -> PasteEntry:
-    # No LLM. No guessing. We only format if the user already provided something close.
     s = raw.strip()
     errs: List[str] = []
     meta: Dict[str, Any] = {}
@@ -898,23 +889,22 @@ def format_website_freeform(raw: str) -> PasteEntry:
     url = extract_url(s)
     if not url:
         errs.append("Website line missing URL. Include https://... or <https://...>.")
-        return PasteEntry(raw=raw, source_type="WEBSITE", text=s, html=escape_text(s), validated=False, validation_errors=errs, meta=meta)
+        return PasteEntry(raw=raw, source_type="WEBSITE", text=clean_text_output(s), html=clean_html_output(escape_text(s)), validated=False, validation_errors=errs, meta=meta)
 
-    # If user provided a near-complete format: Author, 'Title' (Publisher, Date) <URL>
-    # We will only tidy spacing and enforce <...> plus trailing period.
-    # Otherwise mark needs review.
     has_quotes = bool(re.search(r"'[^']+'", s))
     has_paren = "(" in s and ")" in s
 
     if not (has_quotes and has_paren):
         errs.append("Paste mode cannot reliably build website metadata. Use Build mode for websites.")
-        # Still return a minimally normalised line
         out = ensure_angle_brackets(s, url)
         out = out.rstrip(".") + "."
-        return PasteEntry(raw=raw, source_type="WEBSITE", text=strip_tags(out), html=escape_text(out), validated=False, validation_errors=errs, meta={"url": url})
+        out = clean_text_output(out)
+        return PasteEntry(raw=raw, source_type="WEBSITE", text=out, html=escape_text(out), validated=False, validation_errors=errs, meta={"url": url})
 
     out = ensure_angle_brackets(s, url).rstrip(".") + "."
-    return PasteEntry(raw=raw, source_type="WEBSITE", text=strip_tags(out), html=escape_text(out), validated=True, validation_errors=[], meta={"url": url})
+    out_text = clean_text_output(strip_tags(out))
+    out_html = clean_html_output(escape_text(out))
+    return PasteEntry(raw=raw, source_type="WEBSITE", text=out_text, html=out_html, validated=True, validation_errors=[], meta={"url": url})
 
 
 # -----------------------------
@@ -922,7 +912,6 @@ def format_website_freeform(raw: str) -> PasteEntry:
 # -----------------------------
 
 def normalise_v(s: str) -> str:
-    # Replace " v. " with " v "
     return re.sub(r"\sv\.\s", " v ", s, flags=re.I)
 
 
@@ -955,7 +944,6 @@ def normalise_jurisdiction(j: str) -> str:
 
 
 def normalise_person_name(name: str) -> str:
-    # Light touch: collapse whitespace, titlecase if mostly lower
     s = " ".join((name or "").split())
     if not s:
         return s
@@ -978,17 +966,13 @@ def normalise_case_name(case_name: str) -> str:
     if not s:
         return s
 
-    # Force " v " and remove v.
     s = re.sub(r"\sv\.\s", " v ", s, flags=re.I)
 
     if looks_mostly_lower(s):
-        # Title-case words, then fix common tokens
         s = s.title()
 
-    # Fix " V " to " v "
     s = re.sub(r"\sV\s", " v ", s)
 
-    # Preserve (No 2) style: Title() will create (No 2) fine.
     return s
 
 
@@ -1008,7 +992,6 @@ def normalise_leg_provision(prov: str) -> str:
     if not prov:
         return ""
     s = " ".join(prov.split())
-    # Normalise common "s" tokens
     s = re.sub(r"\bsec\b", "s", s, flags=re.I)
     s = re.sub(r"\bsecs\b", "ss", s, flags=re.I)
     s = re.sub(r"\bsection\b", "s", s, flags=re.I)
@@ -1049,10 +1032,8 @@ def extract_url(text: str) -> Optional[str]:
 
 
 def ensure_angle_brackets(text: str, url: str) -> str:
-    # Ensure URL is in <...>
     if f"<{url}>" in text:
         return text
-    # Replace naked url with <url>
     return re.sub(re.escape(url), f"<{url}>", text)
 
 
@@ -1061,7 +1042,89 @@ def strip_tags(s: str) -> str:
 
 
 def escape_text(s: str) -> str:
-    # Escape for safe HTML output. We only generate <i> in controlled places.
     s = s or ""
     s = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     return s
+
+
+# -----------------------------
+# Output cleaners (new, central)
+# -----------------------------
+
+_WS = re.compile(r"\s+")
+_SPACE_BEFORE_PUNCT = re.compile(r"\s+([,.;:\)\]\}])")
+_SPACE_AFTER_OPEN = re.compile(r"([\(\[\{])\s+")
+_WEIRD_SEMI = re.compile(r"\s*;\s*")
+_WEIRD_COMMA = re.compile(r"\s*,\s*")
+_TRAILING_SPACE_BEFORE_PERIOD = re.compile(r"\s+\.")
+
+
+def clean_text_output(s: str) -> str:
+    """
+    Clean final plain-text citation output.
+    Removes extra spaces and fixes punctuation spacing deterministically.
+    """
+    if not s:
+        return ""
+
+    out = str(s)
+
+    # Collapse whitespace first
+    out = _WS.sub(" ", out).strip()
+
+    # Standardise semicolons in case citations: " ; " -> "; "
+    out = _WEIRD_SEMI.sub("; ", out)
+
+    # Remove spaces before punctuation: " ,", " .", " )"
+    out = _SPACE_BEFORE_PUNCT.sub(r"\1", out)
+
+    # Remove spaces after opening brackets: "( 2009)" -> "(2009)"
+    out = _SPACE_AFTER_OPEN.sub(r"\1", out)
+
+    # Fix comma spacing to single: "a , b" -> "a, b"
+    out = _WEIRD_COMMA.sub(", ", out)
+
+    # Remove " ." patterns
+    out = _TRAILING_SPACE_BEFORE_PERIOD.sub(".", out)
+
+    # Final collapse
+    out = _WS.sub(" ", out).strip()
+
+    return out
+
+
+def clean_html_output(s: str) -> str:
+    """
+    Clean final HTML citation output without breaking controlled <i> tags.
+    This does NOT attempt to parse HTML. It just normalises whitespace outside
+    of tag syntax and fixes punctuation spacing similarly to text.
+
+    Assumption: only <i> tags are introduced by this engine (controlled).
+    """
+    if not s:
+        return ""
+
+    out = str(s)
+
+    # Collapse whitespace runs (safe because we don't rely on formatting whitespace)
+    out = _WS.sub(" ", out).strip()
+
+    # Standardise semicolons
+    out = _WEIRD_SEMI.sub("; ", out)
+
+    # Remove spaces before punctuation
+    out = _SPACE_BEFORE_PUNCT.sub(r"\1", out)
+
+    # Remove spaces after opening brackets
+    out = _SPACE_AFTER_OPEN.sub(r"\1", out)
+
+    # Fix comma spacing
+    out = _WEIRD_COMMA.sub(", ", out)
+
+    # Remove " ." patterns
+    out = _TRAILING_SPACE_BEFORE_PERIOD.sub(".", out)
+
+    # Final collapse
+    out = _WS.sub(" ", out).strip()
+
+    return out
