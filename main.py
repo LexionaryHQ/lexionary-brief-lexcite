@@ -1,8 +1,13 @@
 # main.py - Lexionary v3 Brief API + Lexcite AGLC Engine
-# Version: 1.7.0
+# Version: 1.8.0
 # Run: uvicorn main:app --host 0.0.0.0 --port 8000
 
-import os, re, time, logging, urllib.parse, random
+import os
+import re
+import time
+import logging
+import urllib.parse
+import random
 from datetime import datetime
 from typing import List, Optional, Dict, Any, Tuple
 
@@ -13,6 +18,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from aglc_engine import format_citation, format_freeform_line, SourceType
+
 
 # ---------------------------------------------------------------------------
 # Helper to pull out neutral citation from a longer string
@@ -25,6 +31,7 @@ def extract_neutral_citation(user_input: str) -> str | None:
     pattern = r"\[\d{4}\]\s+\S+\s+\d+"
     match = re.search(pattern, text)
     return match.group(0).strip() if match else None
+
 
 # ---- Optional PDF extraction support
 HAS_PDFMINER = False
@@ -39,12 +46,15 @@ except Exception:
     except Exception:
         pdf_extract_text = None  # type: ignore
 
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("lexionary")
+
 
 # ---------------- OpenAI client (brief only) ----------------
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+
 
 class _OpenAIShim:
     def __init__(self):
@@ -95,10 +105,12 @@ class _OpenAIShim:
         else:
             raise RuntimeError("OpenAI not configured. Set OPENAI_API_KEY or install SDK.")
 
+
 _openai = _OpenAIShim()
 
+
 # ---------------- FastAPI + CORS ----------------
-app = FastAPI(title="Lexionary v3 - Brief API + Lexcite", version="1.7.0")
+app = FastAPI(title="Lexionary v3 - Brief API + Lexcite", version="1.8.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -107,24 +119,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # ---------------- Models ----------------
 class BriefRequest(BaseModel):
     query: Optional[str] = Field(None, description="Case name or neutral citation or direct text")
-    url: Optional[str] = Field(None, description="AustLII judgment URL")
+    url: Optional[str] = Field(None, description="AustLII judgment URL or non-direct AustLII page")
     text: Optional[str] = Field(None, description="Raw case text extract (optional)")
     pinpoints: Optional[List[str]] = Field(default_factory=list)
     depth: str = Field(default="standard")
     jurisdiction: str = Field(default="AU")
     tone: str = Field(default="neutral")
 
+
 class BriefResponse(BaseModel):
     success: bool
     brief: str
     meta: Dict[str, Any] = Field(default_factory=dict)
 
+
 # Lexcite models
 class LexciteRequest(BaseModel):
     input_text: str = Field(..., description="One or more citations separated by newlines.")
+
 
 class LexciteEntry(BaseModel):
     id: str
@@ -136,15 +152,18 @@ class LexciteEntry(BaseModel):
     validation_errors: List[str]
     meta: Dict[str, Any] = Field(default_factory=dict)
 
+
 class LexciteResponse(BaseModel):
     api_version: str
     entries: List[LexciteEntry]
     errors: List[str] = Field(default_factory=list)
 
+
 class CitationRequest(BaseModel):
     source_type: SourceType | str
     data: dict
     mode: str = "footnote"
+
 
 # ---------------- AustLII constants ----------------
 AUSTLII_BASE = "https://www.austlii.edu.au"
@@ -156,15 +175,25 @@ AUSTLII_MIRRORS = [
     "https://www7.austlii.edu.au",
 ]
 AUSTLII_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; Lexionary/1.7.0; +https://lexionary.com.au)",
+    "User-Agent": "Mozilla/5.0 (compatible; Lexionary/1.8.0; +https://lexionary.com.au)",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-AU,en;q=0.9",
     "Connection": "keep-alive",
     "Referer": "https://www.austlii.edu.au/",
 }
 
+
 def looks_like_judgment_url(url: str) -> bool:
     return "/cgi-bin/viewdoc/au/cases/" in url and url.endswith(".html")
+
+
+def is_austlii_url(url: str) -> bool:
+    try:
+        host = urllib.parse.urlparse(url).netloc.lower()
+        return "austlii.edu.au" in host
+    except Exception:
+        return False
+
 
 def rewrite_url_to_mirror(url: str, mirror: str) -> str:
     parsed = urllib.parse.urlparse(url)
@@ -172,6 +201,7 @@ def rewrite_url_to_mirror(url: str, mirror: str) -> str:
     return urllib.parse.urlunparse(
         (mpar.scheme, mpar.netloc, parsed.path, parsed.params, parsed.query, parsed.fragment)
     )
+
 
 class RateLimiter:
     def __init__(self, min_interval_sec: float = 1.2):
@@ -185,7 +215,9 @@ class RateLimiter:
             time.sleep(self.min_interval - delta)
         self.last = time.time()
 
+
 limiter = RateLimiter(1.0)
+
 
 def http_get(url: str, timeout: int = 22, headers: Optional[Dict[str, str]] = None) -> requests.Response:
     limiter.wait()
@@ -193,6 +225,7 @@ def http_get(url: str, timeout: int = 22, headers: Optional[Dict[str, str]] = No
     if headers:
         h.update(headers)
     return requests.get(url, headers=h, timeout=timeout)
+
 
 def fetch_url_resilient(url: str, timeout: int = 20, max_total_attempts: int = 6) -> Tuple[str, str, int]:
     attempts = 0
@@ -217,8 +250,10 @@ def fetch_url_resilient(url: str, timeout: int = 20, max_total_attempts: int = 6
     assert last_exc is not None
     raise last_exc
 
+
 def soup_from_html(html: str) -> BeautifulSoup:
     return BeautifulSoup(html, "html.parser")
+
 
 def clean_case_html_to_text(html: str) -> str:
     s = soup_from_html(html)
@@ -232,11 +267,13 @@ def clean_case_html_to_text(html: str) -> str:
     txt = re.sub(r"[ \t]+", " ", txt)
     return txt.strip()
 
+
 CITATION_ON_PAGE_RE = re.compile(r"\[\d{4}\]\s+[A-Z]{2,7}\s+\d{1,4}")
 DATE_RE = re.compile(
     r"(\d{1,2}\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4})",
     re.I,
 )
+
 
 def extract_title_citation_date(html: str) -> Tuple[str, str, Optional[str]]:
     s = soup_from_html(html)
@@ -252,6 +289,7 @@ def extract_title_citation_date(html: str) -> Tuple[str, str, Optional[str]]:
     date_str = m_date.group(1) if m_date else None
     return title, citation, date_str
 
+
 def parse_date_safe(date_str: Optional[str]) -> Optional[datetime]:
     if not date_str:
         return None
@@ -261,6 +299,7 @@ def parse_date_safe(date_str: Optional[str]) -> Optional[datetime]:
         except Exception:
             continue
     return None
+
 
 COURT_PATHS: Dict[str, Tuple[str, str]] = {
     "HCA": ("cth", "HCA"),
@@ -285,9 +324,10 @@ COURT_PATHS: Dict[str, Tuple[str, str]] = {
 }
 
 NEUTRAL_CIT_RE = re.compile(
-    r"^\s*\[?(\d{4})\]?\s+([A-Z]{2,7})\s+(\d{1,4})(?:\s*\(.*?\))?(?:\s*;.*)?\s*$",
+    r"^\s*\[?(\d{4})\]?\s+([A-Z]{2,7})\s+(\d{1,4})(?:\s*\(.*?\))?(?:\s*;*)?\s*$",
     re.I,
 )
+
 
 def resolve_from_citation(q: str) -> Optional[str]:
     m = NEUTRAL_CIT_RE.match((q or "").strip())
@@ -298,6 +338,7 @@ def resolve_from_citation(q: str) -> Optional[str]:
         return None
     jur, court = COURT_PATHS[court_raw]
     return f"{AUSTLII_BASE}/cgi-bin/viewdoc/au/cases/{jur}/{court}/{year}/{num}.html"
+
 
 def austlii_name_search_first_result(query: str) -> Optional[str]:
     if not query:
@@ -318,13 +359,27 @@ def austlii_name_search_first_result(query: str) -> Optional[str]:
                 return full
     return None
 
+
+def extract_judgment_link_from_page(html: str) -> Optional[str]:
+    s = soup_from_html(html)
+    for a in s.find_all("a", href=True):
+        href = a["href"]
+        if "/cgi-bin/viewdoc/au/cases/" in href and href.endswith(".html"):
+            full = href if href.startswith("http") else urllib.parse.urljoin(AUSTLII_BASE, href)
+            if looks_like_judgment_url(full):
+                return full
+    return None
+
+
 def resolve_or_search_case_url(query: Optional[str], url: Optional[str]) -> Tuple[Optional[str], str]:
     if url:
         if looks_like_judgment_url(url):
             return url, "direct"
-        if "austlii.edu.au" in (url or ""):
-            return None, "invalid-direct"
-        raise HTTPException(status_code=400, detail="Only direct AustLII judgment URLs supported in 'url'.")
+
+        if is_austlii_url(url):
+            return url, "non_direct_austlii"
+
+        return None, "unsupported_url"
 
     if query:
         neutral = extract_neutral_citation(query) or query
@@ -337,11 +392,13 @@ def resolve_or_search_case_url(query: Optional[str], url: Optional[str]) -> Tupl
 
     return None, "none"
 
+
 HCA_PDF_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; Lexionary/1.7.0; +https://lexionary.com.au)",
+    "User-Agent": "Mozilla/5.0 (compatible; Lexionary/1.8.0; +https://lexionary.com.au)",
     "Accept": "application/pdf,*/*",
     "Referer": "https://www.hcourt.gov.au/",
 }
+
 
 def try_fetch_hca_pdf(year: str, number: str, query_hint: str = "") -> Tuple[Optional[str], Optional[str], Optional[str]]:
     if not HAS_PDFMINER:
@@ -376,6 +433,7 @@ def try_fetch_hca_pdf(year: str, number: str, query_hint: str = "") -> Tuple[Opt
     except Exception as e:
         log.warning("HCA search failed: %s", e)
         return None, None, "HCA search error"
+
 
 def verify_case_page(html: str, resolved_url: Optional[str]) -> Dict[str, Any]:
     title, citation_on_page, date_str = extract_title_citation_date(html)
@@ -416,6 +474,7 @@ def verify_case_page(html: str, resolved_url: Optional[str]) -> Dict[str, Any]:
         "clean_text": txt,
     }
 
+
 DEPTH_HINT = {
     "concise": "Output must be tight and exam ready. Use bullets. Target 120 to 180 words total.",
     "standard": "Balanced depth with short paragraphs. Target about 250 to 400 words.",
@@ -446,6 +505,7 @@ Authority selection rules:
 • Do not treat the UK Bolam test as controlling for a doctor's duty to warn in Australia. If mentioned, state Rogers v Whitaker material risk standard and that professional opinion is evidentiary, not conclusive.
 • Courts set standards for warnings; professional practice is evidence, not decisive.
 """
+
 
 def build_irac_prompt(
     case_name_or_citation: str,
@@ -496,8 +556,10 @@ SOURCE TEXT (verbatim, truncated):
 \"\"\"{case_text[:12000]}\"\"\""""
     return {"system": system_rules, "user": user_task}
 
+
 def call_openai(system_msg: str, user_msg: str) -> str:
     return _openai.chat(system=system_msg, user=user_msg, max_tokens=900, temperature=0.2)
+
 
 @app.get("/")
 def root():
@@ -505,9 +567,10 @@ def root():
         "ok": True,
         "service": "Lexionary v3 - Brief API + Lexcite",
         "endpoints": ["/health", "/brief", "/cite", "/lexcite/format"],
-        "version": "1.7.0",
+        "version": "1.8.0",
         "has_pdfminer": HAS_PDFMINER,
     }
+
 
 @app.get("/health")
 def health():
@@ -522,6 +585,7 @@ def health():
         "env_key_present": bool(OPENAI_API_KEY),
         "has_pdfminer": HAS_PDFMINER,
     }
+
 
 @app.post("/brief", response_model=BriefResponse)
 def brief(req: BriefRequest, request: Request):
@@ -538,7 +602,83 @@ def brief(req: BriefRequest, request: Request):
     verify_info: Dict[str, Any] = {}
     source_url_used = resolved_url
 
-    if resolved_url:
+    # Handle unsupported non-AustLII URLs cleanly
+    if strategy == "unsupported_url":
+        meta = {
+            "elapsed_ms": int((time.time() - t0) * 1000),
+            "resolved_url": resolved_url,
+            "strategy": strategy,
+            "verified": False,
+            "verify_reason": "Unsupported URL. Use a direct or non-direct AustLII case page, paste the case text, or enter the citation only.",
+            "source_title": "",
+            "source_citation": "",
+            "decision_date": "",
+            "text_length": 0,
+            "mirror_used": mirror_used,
+            "attempts": attempts,
+            "fallback": None,
+            "has_pdfminer": HAS_PDFMINER,
+        }
+        return BriefResponse(
+            success=False,
+            brief="We couldn’t retrieve that case from the URL provided. Try a direct AustLII case page, paste the case text directly, or enter the citation only.",
+            meta=meta,
+        )
+
+    # If user gave a non-direct AustLII URL, fetch it and try to extract a direct judgment URL.
+    if resolved_url and strategy == "non_direct_austlii":
+        try:
+            page_html, mirror_used, attempts = fetch_url_resilient(resolved_url, timeout=20, max_total_attempts=4)
+            extracted = extract_judgment_link_from_page(page_html)
+            if extracted:
+                resolved_url = extracted
+                source_url_used = resolved_url
+                strategy = "direct_from_non_direct_page"
+            else:
+                meta = {
+                    "elapsed_ms": int((time.time() - t0) * 1000),
+                    "resolved_url": resolved_url,
+                    "strategy": strategy,
+                    "verified": False,
+                    "verify_reason": "No direct AustLII judgment link found on that page.",
+                    "source_title": "",
+                    "source_citation": "",
+                    "decision_date": "",
+                    "text_length": 0,
+                    "mirror_used": mirror_used,
+                    "attempts": attempts,
+                    "fallback": None,
+                    "has_pdfminer": HAS_PDFMINER,
+                }
+                return BriefResponse(
+                    success=False,
+                    brief="We couldn’t retrieve or verify that case from the URL provided. Try pasting the case text directly, or enter the citation only.",
+                    meta=meta,
+                )
+        except Exception as e:
+            log.warning("Failed to resolve non-direct AustLII URL: %s", e)
+            meta = {
+                "elapsed_ms": int((time.time() - t0) * 1000),
+                "resolved_url": resolved_url,
+                "strategy": strategy,
+                "verified": False,
+                "verify_reason": f"Unable to fetch the AustLII page: {e}",
+                "source_title": "",
+                "source_citation": "",
+                "decision_date": "",
+                "text_length": 0,
+                "mirror_used": mirror_used,
+                "attempts": attempts,
+                "fallback": None,
+                "has_pdfminer": HAS_PDFMINER,
+            }
+            return BriefResponse(
+                success=False,
+                brief="We couldn’t retrieve or verify that case. Try pasting the case text directly, or enter the citation only.",
+                meta=meta,
+            )
+
+    if resolved_url and strategy in {"direct", "citation", "search", "direct_from_non_direct_page"}:
         try:
             html, mirror_used, attempts = fetch_url_resilient(resolved_url, timeout=20, max_total_attempts=6)
             verify_info = verify_case_page(html, resolved_url)
@@ -605,7 +745,7 @@ def brief(req: BriefRequest, request: Request):
         }
         return BriefResponse(
             success=False,
-            brief=f"Verification failed. No IRAC generated.\nReason: {meta['verify_reason']}\nChecked URL: {resolved_url or 'n/a'}",
+            brief="We couldn’t retrieve or verify that case. Try pasting the case text directly, or enter the citation only.",
             meta=meta,
         )
 
@@ -645,6 +785,7 @@ def brief(req: BriefRequest, request: Request):
     }
     return BriefResponse(success=True, brief=brief_text, meta=meta)
 
+
 @app.post("/cite")
 async def cite(req: CitationRequest):
     try:
@@ -679,12 +820,14 @@ async def cite(req: CitationRequest):
             },
         )
 
+
 # ---------------- Lexcite paste list endpoint ----------------
 
 LEXCITE_MAX_CHARS = 8000
 LEXCITE_MAX_LINES = 50
 LEXCITE_MIN_LINE_LEN = 4
 LEXCITE_MAX_LINE_LEN = 500
+
 
 @app.post("/lexcite/format", response_model=LexciteResponse)
 def lexcite_format(req: LexciteRequest, request: Request):
