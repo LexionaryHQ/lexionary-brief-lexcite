@@ -1,5 +1,5 @@
 # main.py - Lexionary v3 Brief API + Lexcite AGLC Engine
-# Version: 1.8.0
+# Version: 1.8.1
 # Run: uvicorn main:app --host 0.0.0.0 --port 8000
 
 import os
@@ -85,7 +85,7 @@ class _OpenAIShim:
                 self.client = None
                 log.error("OpenAI SDK not available.")
 
-    def chat(self, system: str, user: str, max_tokens: int = 900, temperature: float = 0.2) -> str:
+    def chat(self, system: str, user: str, max_tokens: int = 1200, temperature: float = 0.15) -> str:
         if self.mode == "new" and self.client:
             resp = self.client.chat.completions.create(
                 model=OPENAI_MODEL,
@@ -110,7 +110,7 @@ _openai = _OpenAIShim()
 
 
 # ---------------- FastAPI + CORS ----------------
-app = FastAPI(title="Lexionary v3 - Brief API + Lexcite", version="1.8.0")
+app = FastAPI(title="Lexionary v3 - Brief API + Lexcite", version="1.8.1")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -123,7 +123,7 @@ app.add_middleware(
 # ---------------- Models ----------------
 class BriefRequest(BaseModel):
     query: Optional[str] = Field(None, description="Case name or neutral citation or direct text")
-    url: Optional[str] = Field(None, description="AustLII judgment URL or non-direct AustLII page")
+    url: Optional[str] = Field(None, description="AustLII judgment URL")
     text: Optional[str] = Field(None, description="Raw case text extract (optional)")
     pinpoints: Optional[List[str]] = Field(default_factory=list)
     depth: str = Field(default="standard")
@@ -175,7 +175,7 @@ AUSTLII_MIRRORS = [
     "https://www7.austlii.edu.au",
 ]
 AUSTLII_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; Lexionary/1.8.0; +https://lexionary.com.au)",
+    "User-Agent": "Mozilla/5.0 (compatible; Lexionary/1.8.1; +https://lexionary.com.au)",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-AU,en;q=0.9",
     "Connection": "keep-alive",
@@ -324,7 +324,7 @@ COURT_PATHS: Dict[str, Tuple[str, str]] = {
 }
 
 NEUTRAL_CIT_RE = re.compile(
-    r"^\s*\[?(\d{4})\]?\s+([A-Z]{2,7})\s+(\d{1,4})(?:\s*\(.*?\))?(?:\s*;*)?\s*$",
+    r"^\s*\[?(\d{4})\]?\s+([A-Z]{2,7})\s+(\d{1,4})(?:\s*\(.*?\))?(?:\s*;.*)?\s*$",
     re.I,
 )
 
@@ -364,22 +364,29 @@ def extract_judgment_link_from_page(html: str) -> Optional[str]:
     s = soup_from_html(html)
     for a in s.find_all("a", href=True):
         href = a["href"]
-        if "/cgi-bin/viewdoc/au/cases/" in href and href.endswith(".html"):
-            full = href if href.startswith("http") else urllib.parse.urljoin(AUSTLII_BASE, href)
-            if looks_like_judgment_url(full):
-                return full
+        full = href if href.startswith("http") else urllib.parse.urljoin(AUSTLII_BASE, href)
+        if looks_like_judgment_url(full):
+            return full
     return None
 
 
 def resolve_or_search_case_url(query: Optional[str], url: Optional[str]) -> Tuple[Optional[str], str]:
+    """
+    Conservative resolver:
+    - direct AustLII judgment URL -> direct
+    - non-direct AustLII URL -> non_direct_austlii
+    - neutral citation -> citation
+    - case name search -> search
+    """
     if url:
         if looks_like_judgment_url(url):
             return url, "direct"
-
         if is_austlii_url(url):
             return url, "non_direct_austlii"
-
-        return None, "unsupported_url"
+        raise HTTPException(
+            status_code=400,
+            detail="Only AustLII URLs are supported in 'url'. Otherwise paste case text or use a citation."
+        )
 
     if query:
         neutral = extract_neutral_citation(query) or query
@@ -394,7 +401,7 @@ def resolve_or_search_case_url(query: Optional[str], url: Optional[str]) -> Tupl
 
 
 HCA_PDF_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; Lexionary/1.8.0; +https://lexionary.com.au)",
+    "User-Agent": "Mozilla/5.0 (compatible; Lexionary/1.8.1; +https://lexionary.com.au)",
     "Accept": "application/pdf,*/*",
     "Referer": "https://www.hcourt.gov.au/",
 }
@@ -506,6 +513,7 @@ Authority selection rules:
 • Courts set standards for warnings; professional practice is evidence, not decisive.
 """
 
+
 def build_irac_prompt(
     case_name_or_citation: str,
     case_text: str,
@@ -523,7 +531,7 @@ def build_irac_prompt(
         "You produce accurate IRAC case briefs for Australian law students. "
         "Rely only on the provided case text. Do not fabricate facts, issues, holdings, ratio, or legal principles. "
         "If the text is incomplete or unclear, say so briefly and proceed conservatively. "
-        "Do not use generic filler such as 'the court applied the rule to the facts' unless you immediately explain how and why. "
+        "Do not use generic filler unless you immediately explain it with specific reasoning from the text. "
         "Your job is not just to summarise. Your job is to identify the legal significance of the case."
     )
 
@@ -547,7 +555,6 @@ IRAC Summary
 Issue
 • State the real legal controversy, not just the topic.
 • If there are multiple issues, identify the main one first and then any secondary issue briefly.
-• Avoid generic framing.
 
 Rule
 • State the governing legal rule, test, principle, or standard drawn from the case text.
@@ -583,12 +590,11 @@ CONSTRAINTS:
 SOURCE TEXT (verbatim, truncated):
 \"\"\"{case_text[:12000]}\"\"\"
 """
-    return {{"system": system_rules, "user": user_task}}
-
+    return {"system": system_rules, "user": user_task}
 
 
 def call_openai(system_msg: str, user_msg: str) -> str:
-    return _openai.chat(system=system_msg, user=user_msg, max_tokens=900, temperature=0.2)
+    return _openai.chat(system=system_msg, user=user_msg, max_tokens=1200, temperature=0.15)
 
 
 @app.get("/")
@@ -597,7 +603,7 @@ def root():
         "ok": True,
         "service": "Lexionary v3 - Brief API + Lexcite",
         "endpoints": ["/health", "/brief", "/cite", "/lexcite/format"],
-        "version": "1.8.0",
+        "version": "1.8.1",
         "has_pdfminer": HAS_PDFMINER,
     }
 
@@ -632,45 +638,22 @@ def brief(req: BriefRequest, request: Request):
     verify_info: Dict[str, Any] = {}
     source_url_used = resolved_url
 
-    # Handle unsupported non-AustLII URLs cleanly
-    if strategy == "unsupported_url":
-        meta = {
-            "elapsed_ms": int((time.time() - t0) * 1000),
-            "resolved_url": resolved_url,
-            "strategy": strategy,
-            "verified": False,
-            "verify_reason": "Unsupported URL. Use a direct or non-direct AustLII case page, paste the case text, or enter the citation only.",
-            "source_title": "",
-            "source_citation": "",
-            "decision_date": "",
-            "text_length": 0,
-            "mirror_used": mirror_used,
-            "attempts": attempts,
-            "fallback": None,
-            "has_pdfminer": HAS_PDFMINER,
-        }
-        return BriefResponse(
-            success=False,
-            brief="We couldn’t retrieve that case from the URL provided. Try a direct AustLII case page, paste the case text directly, or enter the citation only.",
-            meta=meta,
-        )
-
-    # If user gave a non-direct AustLII URL, fetch it and try to extract a direct judgment URL.
+    # Conservative handling of non-direct AustLII pages
     if resolved_url and strategy == "non_direct_austlii":
         try:
             page_html, mirror_used, attempts = fetch_url_resilient(resolved_url, timeout=20, max_total_attempts=4)
-            extracted = extract_judgment_link_from_page(page_html)
-            if extracted:
-                resolved_url = extracted
+            extracted_url = extract_judgment_link_from_page(page_html)
+            if extracted_url:
+                resolved_url = extracted_url
                 source_url_used = resolved_url
-                strategy = "direct_from_non_direct_page"
+                strategy = "resolved_from_non_direct_austlii"
             else:
                 meta = {
                     "elapsed_ms": int((time.time() - t0) * 1000),
                     "resolved_url": resolved_url,
                     "strategy": strategy,
                     "verified": False,
-                    "verify_reason": "No direct AustLII judgment link found on that page.",
+                    "verify_reason": "Could not find a direct AustLII judgment page from that URL.",
                     "source_title": "",
                     "source_citation": "",
                     "decision_date": "",
@@ -686,7 +669,7 @@ def brief(req: BriefRequest, request: Request):
                     meta=meta,
                 )
         except Exception as e:
-            log.warning("Failed to resolve non-direct AustLII URL: %s", e)
+            log.warning("Non-direct AustLII fetch failed: %s", e)
             meta = {
                 "elapsed_ms": int((time.time() - t0) * 1000),
                 "resolved_url": resolved_url,
@@ -708,7 +691,7 @@ def brief(req: BriefRequest, request: Request):
                 meta=meta,
             )
 
-    if resolved_url and strategy in {"direct", "citation", "search", "direct_from_non_direct_page"}:
+    if resolved_url:
         try:
             html, mirror_used, attempts = fetch_url_resilient(resolved_url, timeout=20, max_total_attempts=6)
             verify_info = verify_case_page(html, resolved_url)
