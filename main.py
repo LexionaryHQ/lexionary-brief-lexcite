@@ -506,7 +506,6 @@ Authority selection rules:
 • Courts set standards for warnings; professional practice is evidence, not decisive.
 """
 
-
 def build_irac_prompt(
     case_name_or_citation: str,
     case_text: str,
@@ -519,32 +518,61 @@ def build_irac_prompt(
     tone_note = TONE_HINT.get(tone, "Neutral academic tone.")
     jur_note = JUR_HINT.get(jurisdiction, "Use Australian authorities and terminology.")
     pins = f"Focus on paragraphs: {', '.join(pinpoints)}." if pinpoints else ""
+
     system_rules = (
         "You produce accurate IRAC case briefs for Australian law students. "
-        "Rely on the provided case text; do not fabricate facts or holdings. "
-        "If text is insufficient, identify what is missing and proceed conservatively."
+        "Rely only on the provided case text. Do not fabricate facts, issues, holdings, ratio, or legal principles. "
+        "If the text is incomplete or unclear, say so briefly and proceed conservatively. "
+        "Do not use generic filler such as 'the court applied the rule to the facts' unless you immediately explain how and why. "
+        "Your job is not just to summarise. Your job is to identify the legal significance of the case."
     )
+
     user_task = f"""
 CASE: {case_name_or_citation}
 
-GOAL: Produce an IRAC summary strictly from the provided case text.
+GOAL:
+Produce a legally useful IRAC case brief strictly from the provided case text.
+The brief must help an Australian law student understand:
+1. what the real legal issue was,
+2. what rule or principle the court applied,
+3. why the rule mattered on these facts,
+4. what the court ultimately decided.
 
 {AUTHORITY_RULES}
 
 OUTPUT FORMAT:
+
 IRAC Summary
 
 Issue
-• One to three lines stating the central issues.
+• State the real legal controversy, not just the topic.
+• If there are multiple issues, identify the main one first and then any secondary issue briefly.
+• Avoid generic framing.
 
 Rule
-• Governing rules and tests with brief authority references if clear.
+• State the governing legal rule, test, principle, or standard drawn from the case text.
+• If the court discusses competing rules, explain which one controlled.
+• Mention authorities only if they are clear from the text.
+• Be specific about the legal standard.
 
 Application
-• Apply the rules to the facts as stated. Avoid speculation.
+• This is the most important section.
+• Explain how the court applied the rule to the facts.
+• Identify the facts, reasoning steps, or legal considerations that were decisive.
+• Use “because” logic: what mattered, why it mattered, and how it led to the outcome.
+• If the court rejected an argument, say what was rejected and why.
+• Avoid vague phrases unless they are followed by specific reasoning from the text.
 
 Conclusion
-• Short outcome and disposition.
+• State the outcome clearly and shortly.
+• If possible, state what the case stands for in one sentence.
+
+ADDITIONAL RULES:
+• Do not invent details not supported by the text.
+• Do not pad with generic legal writing.
+• Prefer concrete reasoning over broad summary.
+• If the rule or application is uncertain because the text is incomplete, say what is missing.
+• Write like a strong law student’s case brief, not a chatbot summary.
 
 CONSTRAINTS:
 • {jur_note}
@@ -553,8 +581,10 @@ CONSTRAINTS:
 • {pins}
 
 SOURCE TEXT (verbatim, truncated):
-\"\"\"{case_text[:12000]}\"\"\""""
-    return {"system": system_rules, "user": user_task}
+\"\"\"{case_text[:12000]}\"\"\"
+"""
+    return {{"system": system_rules, "user": user_task}}
+
 
 
 def call_openai(system_msg: str, user_msg: str) -> str:
