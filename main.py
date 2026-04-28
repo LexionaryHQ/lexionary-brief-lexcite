@@ -1,5 +1,5 @@
 # main.py - Lexionary v3 Brief API + Lexcite AGLC Engine
-# Version: 1.8.1
+# Version: 1.8.2
 # Run: uvicorn main:app --host 0.0.0.0 --port 8000
 
 import os
@@ -110,7 +110,7 @@ _openai = _OpenAIShim()
 
 
 # ---------------- FastAPI + CORS ----------------
-app = FastAPI(title="Lexionary v3 - Brief API + Lexcite", version="1.8.1")
+app = FastAPI(title="Lexionary v3 - Brief API + Lexcite", version="1.8.2")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -135,6 +135,21 @@ class BriefResponse(BaseModel):
     success: bool
     brief: str
     meta: Dict[str, Any] = Field(default_factory=dict)
+
+
+# ---------------- CBG user-facing messages ----------------
+CBG_VERIFY_FAILED_MESSAGE = (
+    "We couldn’t verify this case automatically.\n\n"
+    "Lexionary only generates case briefs from verified or pasted case text. "
+    "This prevents inaccurate or invented case summaries.\n\n"
+    "Try one of these:\n"
+    "• Enter a clean citation, for example: [1992] HCA 23\n"
+    "• Enter the full case name\n"
+    "• Paste the judgment text directly"
+)
+
+CBG_VERIFY_FAILED_CTA = "Paste case text instead"
+CBG_VERIFY_FAILED_CODE = "case_not_verified"
 
 
 # Lexcite models
@@ -603,7 +618,7 @@ def root():
         "ok": True,
         "service": "Lexionary v3 - Brief API + Lexcite",
         "endpoints": ["/health", "/brief", "/cite", "/lexcite/format"],
-        "version": "1.8.1",
+        "version": "1.8.2",
         "has_pdfminer": HAS_PDFMINER,
     }
 
@@ -653,6 +668,14 @@ def brief(req: BriefRequest, request: Request):
                     "resolved_url": resolved_url,
                     "strategy": strategy,
                     "verified": False,
+                    "error_code": CBG_VERIFY_FAILED_CODE,
+                    "user_message": CBG_VERIFY_FAILED_MESSAGE,
+                    "cta": CBG_VERIFY_FAILED_CTA,
+                    "suggested_actions": [
+                        "Enter a clean citation, for example: [1992] HCA 23",
+                        "Enter the full case name",
+                        "Paste the judgment text directly",
+                    ],
                     "verify_reason": "Could not find a direct AustLII judgment page from that URL.",
                     "source_title": "",
                     "source_citation": "",
@@ -665,7 +688,7 @@ def brief(req: BriefRequest, request: Request):
                 }
                 return BriefResponse(
                     success=False,
-                    brief="We couldn’t retrieve or verify that case from the URL provided. Try pasting the case text directly, or enter the citation only.",
+                    brief=CBG_VERIFY_FAILED_MESSAGE,
                     meta=meta,
                 )
         except Exception as e:
@@ -675,6 +698,14 @@ def brief(req: BriefRequest, request: Request):
                 "resolved_url": resolved_url,
                 "strategy": strategy,
                 "verified": False,
+                "error_code": CBG_VERIFY_FAILED_CODE,
+                "user_message": CBG_VERIFY_FAILED_MESSAGE,
+                "cta": CBG_VERIFY_FAILED_CTA,
+                "suggested_actions": [
+                    "Enter a clean citation, for example: [1992] HCA 23",
+                    "Enter the full case name",
+                    "Paste the judgment text directly",
+                ],
                 "verify_reason": f"Unable to fetch the AustLII page: {e}",
                 "source_title": "",
                 "source_citation": "",
@@ -687,7 +718,7 @@ def brief(req: BriefRequest, request: Request):
             }
             return BriefResponse(
                 success=False,
-                brief="We couldn’t retrieve or verify that case. Try pasting the case text directly, or enter the citation only.",
+                brief=CBG_VERIFY_FAILED_MESSAGE,
                 meta=meta,
             )
 
@@ -758,7 +789,7 @@ def brief(req: BriefRequest, request: Request):
         }
         return BriefResponse(
             success=False,
-            brief="We couldn’t retrieve or verify that case. Try pasting the case text directly, or enter the citation only.",
+            brief=CBG_VERIFY_FAILED_MESSAGE,
             meta=meta,
         )
 
