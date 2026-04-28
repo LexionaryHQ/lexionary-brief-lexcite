@@ -137,6 +137,14 @@ class BriefResponse(BaseModel):
     meta: Dict[str, Any] = Field(default_factory=dict)
 
 
+CBG_RETRIEVAL_UNAVAILABLE_MESSAGE = (
+    "We couldn’t retrieve this case automatically.\n\n"
+    "Sorry — case retrieval is currently unavailable.\n\n"
+    "To generate a case brief, please paste the judgment text directly below.\n\n"
+    "This is the fastest and most reliable way to get an accurate IRAC summary."
+)
+
+
 # Lexcite models
 class LexciteRequest(BaseModel):
     input_text: str = Field(..., description="One or more citations separated by newlines.")
@@ -665,13 +673,7 @@ def brief(req: BriefRequest, request: Request):
                 }
                 return BriefResponse(
                     success=False,
-                    brief="We couldn’t retrieve this case automatically.
-
-Sorry — case retrieval is currently unavailable.
-
-To generate a case brief, please paste the judgment text directly below.
-
-This is the fastest and most reliable way to get an accurate IRAC summary.",
+                    brief=CBG_RETRIEVAL_UNAVAILABLE_MESSAGE,
                     meta=meta,
                 )
         except Exception as e:
@@ -693,13 +695,7 @@ This is the fastest and most reliable way to get an accurate IRAC summary.",
             }
             return BriefResponse(
                 success=False,
-                brief="We couldn’t retrieve this case automatically.
-
-Sorry — case retrieval is currently unavailable.
-
-To generate a case brief, please paste the judgment text directly below.
-
-This is the fastest and most reliable way to get an accurate IRAC summary.",
+                brief=CBG_RETRIEVAL_UNAVAILABLE_MESSAGE,
                 meta=meta,
             )
 
@@ -770,13 +766,7 @@ This is the fastest and most reliable way to get an accurate IRAC summary.",
         }
         return BriefResponse(
             success=False,
-            brief="We couldn’t retrieve this case automatically.
-
-Sorry — case retrieval is currently unavailable.
-
-To generate a case brief, please paste the judgment text directly below.
-
-This is the fastest and most reliable way to get an accurate IRAC summary.",
+            brief=CBG_RETRIEVAL_UNAVAILABLE_MESSAGE,
             meta=meta,
         )
 
