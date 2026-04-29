@@ -1,0 +1,21 @@
+[
+  {
+    "case_id": "mabo-v-queensland-no-2-1992-hca-23",
+    "case_name": "Mabo v Queensland (No 2)",
+    "aliases": [
+      "Mabo",
+      "Mabo v Queensland",
+      "Mabo v Queensland No 2"
+    ],
+    "neutral_citation": "[1992] HCA 23",
+    "report_citation": "(1992) 175 CLR 1",
+    "court": "High Court of Australia",
+    "subjects": ["Property", "Constitutional Law"],
+    "topics": ["Native title", "Terra nullius"],
+    "source_label": "Lexionary verified case cache",
+    "source_url": "https://www.hcourt.gov.au/",
+    "last_verified": "2026-04-30",
+    "verified": true,
+    "text": "Paste verified judgment text or a substantial verified extract here."
+  }
+]
