@@ -19,6 +19,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from aglc_engine import format_citation, format_freeform_line, SourceType
 
+# ---------------- Verified case cache (CBG trust recovery) ----------------
+try:
+    from case_cache import find_cached_case
+except Exception as e:
+    find_cached_case = None  # type: ignore
+    logging.warning("Case cache unavailable at startup: %s", e)
+
 
 # ---------------------------------------------------------------------------
 # Helper to pull out neutral citation from a longer string
@@ -138,10 +145,9 @@ class BriefResponse(BaseModel):
 
 
 CBG_RETRIEVAL_UNAVAILABLE_MESSAGE = (
-    "We couldn’t retrieve this case automatically.\n\n"
-    "Sorry — case retrieval is currently unavailable.\n\n"
-    "To generate a case brief, please paste the judgment text directly below.\n\n"
-    "This is the fastest and most reliable way to get an accurate IRAC summary."
+    "We couldn’t find this case in Lexionary’s verified case cache.\n\n"
+    "You can still generate a case brief by pasting the judgment text directly below.\n\n"
+    "Lexionary only generates case briefs from real case text to protect accuracy."
 )
 
 
@@ -605,6 +611,27 @@ def call_openai(system_msg: str, user_msg: str) -> str:
     return _openai.chat(system=system_msg, user=user_msg, max_tokens=1200, temperature=0.15)
 
 
+def generate_irac_from_case_text(
+    *,
+    case_label: str,
+    case_text: str,
+    pinpoints: List[str],
+    depth: str,
+    jurisdiction: str,
+    tone: str,
+) -> str:
+    """Shared generation path for verified cache, retrieved sources and pasted text."""
+    payload = build_irac_prompt(
+        case_name_or_citation=case_label,
+        case_text=case_text,
+        pinpoints=pinpoints or [],
+        depth=(depth or "standard").lower(),
+        jurisdiction=(jurisdiction or "AU").upper(),
+        tone=(tone or "neutral").lower(),
+    )
+    return call_openai(payload["system"], payload["user"])
+
+
 @app.get("/")
 def root():
     return {
@@ -637,6 +664,93 @@ def brief(req: BriefRequest, request: Request):
 
     if not (req.query or req.url or req.text):
         raise HTTPException(status_code=400, detail="Provide 'query', 'url', or 'text'.")
+
+    # -----------------------------------------------------------------------
+    # 1) Verified case cache first
+    # -----------------------------------------------------------------------
+    # Cache lookup intentionally runs before any live retrieval. This restores
+    # trust by making known high-frequency cases reliable and fast.
+    #
+    # We only lookup query-style inputs. If req.text is supplied, that is
+    # treated as pasted judgment text and handled later by the direct text path.
+    if req.query and find_cached_case:
+        try:
+            cached_case = find_cached_case(req.query)
+        except Exception as e:
+            cached_case = None
+            log.warning("Case cache lookup failed: %s", e)
+
+        if cached_case:
+            cached_text = (cached_case.get("text") or "").strip()
+
+            if len(cached_text) < 800:
+                log.warning(
+                    "Cached case text too short for %s (%d chars).",
+                    cached_case.get("case_id") or cached_case.get("case_name"),
+                    len(cached_text),
+                )
+                return BriefResponse(
+                    success=False,
+                    brief=CBG_RETRIEVAL_UNAVAILABLE_MESSAGE,
+                    meta={
+                        "elapsed_ms": int((time.time() - t0) * 1000),
+                        "strategy": "verified_cache_text_too_short",
+                        "verified": False,
+                        "source_label": "Lexionary verified case cache",
+                        "source_title": cached_case.get("case_name", ""),
+                        "source_citation": cached_case.get("neutral_citation", ""),
+                        "text_length": len(cached_text),
+                    },
+                )
+
+            case_label = " ".join(
+                part for part in [
+                    cached_case.get("case_name"),
+                    cached_case.get("neutral_citation"),
+                    cached_case.get("report_citation"),
+                ]
+                if part
+            )
+
+            try:
+                brief_text = generate_irac_from_case_text(
+                    case_label=case_label or req.query,
+                    case_text=cached_text,
+                    pinpoints=req.pinpoints or [],
+                    depth=req.depth,
+                    jurisdiction=req.jurisdiction,
+                    tone=req.tone,
+                )
+            except Exception as e:
+                raise HTTPException(status_code=502, detail=f"Summariser failed: {e}")
+
+            meta = {
+                "elapsed_ms": int((time.time() - t0) * 1000),
+                "resolved_url": cached_case.get("source_url", ""),
+                "strategy": "verified_cache",
+                "verified": True,
+                "source_label": cached_case.get("source_label") or "Lexionary verified case cache",
+                "source_title": cached_case.get("case_name", ""),
+                "source_citation": cached_case.get("neutral_citation", ""),
+                "report_citation": cached_case.get("report_citation", ""),
+                "court": cached_case.get("court", ""),
+                "subjects": cached_case.get("subjects", []),
+                "topics": cached_case.get("topics", []),
+                "source_url": cached_case.get("source_url", ""),
+                "last_verified": cached_case.get("last_verified", ""),
+                "depth": req.depth,
+                "jurisdiction": req.jurisdiction,
+                "tone": req.tone,
+                "pinpoints": req.pinpoints or [],
+                "text_length": len(cached_text),
+                "length_chars": len(brief_text),
+                "mirror_used": "",
+                "attempts": 0,
+                "fallback": None,
+                "has_pdfminer": HAS_PDFMINER,
+            }
+            log.info("CBG cache hit: %s", cached_case.get("case_id") or case_label)
+            return BriefResponse(success=True, brief=brief_text, meta=meta)
 
     resolved_url, strategy = resolve_or_search_case_url(req.query, req.url)
 
