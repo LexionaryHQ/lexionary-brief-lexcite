@@ -2,151 +2,247 @@
   {
     "case_id": "mabo-v-queensland-no-2-1992-hca-23",
     "case_name": "Mabo v Queensland (No 2)",
-    "aliases": ["Mabo", "Mabo v Queensland"],
+    "aliases": [
+      "Mabo",
+      "Mabo v Queensland",
+      "Mabo v Queensland No 2"
+    ],
     "neutral_citation": "[1992] HCA 23",
     "report_citation": "(1992) 175 CLR 1",
     "court": "High Court of Australia",
-    "subjects": ["Property", "Constitutional Law"],
-    "topics": ["Native title", "Terra nullius"],
+    "subjects": [
+      "Property",
+      "Constitutional Law"
+    ],
+    "topics": [
+      "Native title",
+      "Terra nullius"
+    ],
     "source_label": "Lexionary verified case cache",
     "source_url": "https://www.hcourt.gov.au/",
     "last_verified": "2026-04-30",
     "verified": true,
-    "text": "The High Court rejected terra nullius and recognised native title. The Court held that Indigenous Australians have rights to land based on traditional laws and customs, provided those rights have not been extinguished. Native title is recognised by the common law and may coexist with other interests."
+    "text": "Mabo v Queensland (No 2) is a landmark High Court of Australia decision concerning native title and the status of Indigenous rights to land under Australian common law. The Court rejected the doctrine of terra nullius and held that the common law of Australia could recognise native title where Aboriginal and Torres Strait Islander peoples had maintained a connection with land according to traditional laws and customs. The case established that native title may survive the acquisition of sovereignty, although it may be extinguished by valid government acts inconsistent with the continued enjoyment of native title. The reasoning mattered because it shifted Australian land law away from the assumption that the continent was legally empty at settlement and recognised that pre-existing Indigenous rights could have legal effect within the common law. The case is central to property and constitutional law because it explains the relationship between sovereignty, radical title, common law recognition, and extinguishment."
   },
   {
     "case_id": "donoghue-v-stevenson-1932-ac-562",
     "case_name": "Donoghue v Stevenson",
-    "aliases": ["Donoghue"],
+    "aliases": [
+      "Donoghue",
+      "Donoghue v Stevenson snail",
+      "snail in the bottle"
+    ],
     "neutral_citation": "[1932] AC 562",
     "report_citation": "[1932] AC 562",
     "court": "House of Lords",
-    "subjects": ["Torts"],
-    "topics": ["Negligence", "Duty of care"],
+    "subjects": [
+      "Torts"
+    ],
+    "topics": [
+      "Negligence",
+      "Duty of care",
+      "Neighbour principle"
+    ],
     "source_label": "Lexionary verified case cache",
     "source_url": "",
     "last_verified": "2026-04-30",
     "verified": true,
-    "text": "Established the modern law of negligence. A manufacturer owes a duty of care to the ultimate consumer where harm is reasonably foreseeable. Lord Atkin formulated the neighbour principle: one must take reasonable care to avoid acts or omissions which can reasonably be foreseen to injure one's neighbour."
+    "text": "Donoghue v Stevenson established the modern foundation of negligence. The plaintiff alleged that she became ill after consuming ginger beer containing a decomposed snail. Although she had no contract with the manufacturer, the House of Lords held that a manufacturer may owe a duty of care to the ultimate consumer where harm is reasonably foreseeable. Lord Atkin's neighbour principle stated that a person must take reasonable care to avoid acts or omissions which can reasonably be foreseen as likely to injure persons who are closely and directly affected by those acts. The case matters because it separated negligence liability from contract and created a general method for identifying duties of care. It is commonly used to explain foreseeability, proximity, and the emergence of a general duty of care framework."
   },
   {
-    "case_id": "carlill-v-carbolic-smoke-ball-1893",
+    "case_id": "carlill-v-carbolic-smoke-ball-1893-1-qb-256",
     "case_name": "Carlill v Carbolic Smoke Ball Co",
-    "aliases": ["Carlill"],
+    "aliases": [
+      "Carlill",
+      "Carbolic Smoke Ball",
+      "Carlill v Carbolic"
+    ],
     "neutral_citation": "[1893] 1 QB 256",
     "report_citation": "[1893] 1 QB 256",
     "court": "Court of Appeal",
-    "subjects": ["Contracts"],
-    "topics": ["Unilateral offer"],
+    "subjects": [
+      "Contracts"
+    ],
+    "topics": [
+      "Offer",
+      "Acceptance",
+      "Unilateral contract",
+      "Consideration"
+    ],
     "source_label": "Lexionary verified case cache",
     "source_url": "",
     "last_verified": "2026-04-30",
     "verified": true,
-    "text": "The Court held that a unilateral offer can be accepted by performance. The advertisement constituted a binding offer, and performance of the conditions amounted to acceptance. Consideration was provided through the inconvenience suffered by the plaintiff."
+    "text": "Carlill v Carbolic Smoke Ball Co is a leading contract law case on unilateral offers. The defendant advertised that it would pay a reward to anyone who used the smoke ball as directed and still contracted influenza, and stated that money had been deposited to show sincerity. The Court of Appeal held that the advertisement was not mere puff because it showed an intention to be bound. It was a unilateral offer to the world, capable of acceptance by performance. Mrs Carlill accepted the offer by using the product as directed and contracting influenza. Consideration existed because she incurred the inconvenience of using the smoke ball and the company received the benefit of increased sales. The case is important for formation, intention, certainty, acceptance by conduct, and unilateral contracts."
   },
   {
     "case_id": "engineers-case-1920-hca-54",
     "case_name": "Amalgamated Society of Engineers v Adelaide Steamship Co Ltd",
-    "aliases": ["Engineers Case"],
+    "aliases": [
+      "Engineers Case",
+      "Engineers",
+      "Amalgamated Society of Engineers"
+    ],
     "neutral_citation": "[1920] HCA 54",
     "report_citation": "(1920) 28 CLR 129",
     "court": "High Court of Australia",
-    "subjects": ["Constitutional Law"],
-    "topics": ["Interpretation"],
+    "subjects": [
+      "Constitutional Law"
+    ],
+    "topics": [
+      "Constitutional interpretation",
+      "Reserved state powers",
+      "Implied immunities"
+    ],
     "source_label": "Lexionary verified case cache",
     "source_url": "",
     "last_verified": "2026-04-30",
     "verified": true,
-    "text": "Established that constitutional interpretation should follow ordinary principles of statutory interpretation. Rejected implied immunities and reserved state powers doctrines."
+    "text": "The Engineers Case transformed Australian constitutional interpretation. The High Court rejected earlier doctrines of implied intergovernmental immunities and reserved state powers. The Court held that Commonwealth legislative powers should be interpreted according to the ordinary meaning of the constitutional text, read in context, rather than restricted by implications designed to preserve state autonomy. The reasoning mattered because it expanded the practical reach of Commonwealth legislative power and marked a move toward text-based interpretation. The case is a foundational authority in Australian constitutional law because it changed the balance of federal power and remains central to interpreting Commonwealth heads of power."
   },
   {
-    "case_id": "lange-v-abc-1997-hca-25",
+    "case_id": "lange-v-australian-broadcasting-corporation-1997-hca-25",
     "case_name": "Lange v Australian Broadcasting Corporation",
-    "aliases": ["Lange v ABC"],
+    "aliases": [
+      "Lange",
+      "Lange v ABC"
+    ],
     "neutral_citation": "[1997] HCA 25",
     "report_citation": "(1997) 189 CLR 520",
     "court": "High Court of Australia",
-    "subjects": ["Constitutional Law"],
-    "topics": ["Implied freedom"],
+    "subjects": [
+      "Constitutional Law"
+    ],
+    "topics": [
+      "Implied freedom of political communication",
+      "Defamation"
+    ],
     "source_label": "Lexionary verified case cache",
     "source_url": "",
     "last_verified": "2026-04-30",
     "verified": true,
-    "text": "Confirmed the implied freedom of political communication and established a structured test to assess whether a law impermissibly burdens that freedom."
+    "text": "Lange v Australian Broadcasting Corporation confirmed the implied freedom of political communication under the Australian Constitution. The case arose in the context of a defamation claim by a former New Zealand Prime Minister. The High Court held that the Constitution requires freedom of communication about government and political matters because representative and responsible government depend on electors being able to receive and discuss political information. The Court reformulated the test for whether a law impermissibly burdens the freedom. The freedom is not a personal right but a restriction on legislative and executive power. The case is important because it connects the implied freedom to the text and structure of the Constitution and provides the framework for analysing burdens on political communication."
   },
   {
-    "case_id": "wyong-v-shirt-1980-hca-12",
+    "case_id": "wyong-shire-council-v-shirt-1980-hca-12",
     "case_name": "Wyong Shire Council v Shirt",
-    "aliases": ["Wyong v Shirt"],
+    "aliases": [
+      "Wyong v Shirt",
+      "Shirt",
+      "Wyong"
+    ],
     "neutral_citation": "[1980] HCA 12",
     "report_citation": "(1980) 146 CLR 40",
     "court": "High Court of Australia",
-    "subjects": ["Torts"],
-    "topics": ["Negligence"],
+    "subjects": [
+      "Torts"
+    ],
+    "topics": [
+      "Negligence",
+      "Breach of duty",
+      "Foreseeable risk"
+    ],
     "source_label": "Lexionary verified case cache",
     "source_url": "",
     "last_verified": "2026-04-30",
     "verified": true,
-    "text": "Established the test for breach of duty. A risk is foreseeable if it is not far-fetched or fanciful, and the court balances probability, seriousness, burden of precautions, and utility of the activity."
+    "text": "Wyong Shire Council v Shirt is a leading Australian negligence case on breach of duty. The High Court held that a risk is foreseeable if it is not far-fetched or fanciful. Once foreseeability is established, the court asks what a reasonable person would do in response to the risk. That assessment involves balancing the probability of harm, the seriousness of the possible injury, the burden of taking precautions, and the social utility of the activity. The case is important because it shows that foreseeability alone does not establish breach. The real issue is whether a reasonable person in the defendant's position would have taken precautions. It remains a foundational case for analysing breach in negligence."
   },
   {
     "case_id": "baltic-shipping-v-dillon-1993-hca-4",
     "case_name": "Baltic Shipping Co v Dillon",
-    "aliases": ["Baltic Shipping"],
+    "aliases": [
+      "Baltic Shipping",
+      "Baltic Shipping v Dillon"
+    ],
     "neutral_citation": "[1993] HCA 4",
     "report_citation": "(1993) 176 CLR 344",
     "court": "High Court of Australia",
-    "subjects": ["Contracts"],
-    "topics": ["Damages"],
+    "subjects": [
+      "Contracts"
+    ],
+    "topics": [
+      "Contract damages",
+      "Disappointment",
+      "Distress",
+      "Restitution"
+    ],
     "source_label": "Lexionary verified case cache",
     "source_url": "",
     "last_verified": "2026-04-30",
     "verified": true,
-    "text": "The High Court held that damages for disappointment and distress are generally not recoverable in contract unless the contract is for enjoyment or relaxation."
+    "text": "Baltic Shipping Co v Dillon concerned contract damages following a cruise that was cut short when the ship sank. The High Court considered whether the plaintiff could recover damages for disappointment and distress as well as restitutionary recovery for the fare. The case is commonly studied for the limits of damages in contract and the circumstances in which damages for disappointment or distress may be available. The reasoning distinguishes ordinary commercial contracts from contracts directed toward enjoyment, relaxation or pleasure. The case is important because it illustrates how contract remedies protect the plaintiff's expectation interest, while also recognising that some contracts have non-financial purposes that may justify damages for disappointment."
   },
   {
     "case_id": "salomon-v-salomon-1897-ac-22",
     "case_name": "Salomon v Salomon & Co Ltd",
-    "aliases": ["Salomon"],
+    "aliases": [
+      "Salomon",
+      "Salomon v Salomon"
+    ],
     "neutral_citation": "[1897] AC 22",
     "report_citation": "[1897] AC 22",
     "court": "House of Lords",
-    "subjects": ["Company Law"],
-    "topics": ["Separate legal personality"],
+    "subjects": [
+      "Company Law"
+    ],
+    "topics": [
+      "Separate legal personality",
+      "Corporate veil"
+    ],
     "source_label": "Lexionary verified case cache",
     "source_url": "",
     "last_verified": "2026-04-30",
     "verified": true,
-    "text": "Established that a company is a separate legal entity distinct from its shareholders, even if controlled by a single individual."
+    "text": "Salomon v Salomon & Co Ltd established the principle of separate legal personality. Once a company is validly incorporated, it is a legal person separate from its shareholders, directors and controllers. Mr Salomon controlled the company, but the House of Lords held that the company was not his agent or trustee merely because he held most of the shares. The company's debts were its own, not automatically the debts of Mr Salomon personally. The case is foundational in company law because it explains limited liability, corporate personality, and the corporate veil. It is also the starting point for analysing when courts may or may not disregard the separate legal entity of a company."
   },
   {
-    "case_id": "keech-v-sandford-1726",
+    "case_id": "keech-v-sandford-1726-sel-cas-ch-61",
     "case_name": "Keech v Sandford",
-    "aliases": ["Keech"],
+    "aliases": [
+      "Keech",
+      "Keech v Sanford"
+    ],
     "neutral_citation": "(1726) Sel Cas Ch 61",
     "report_citation": "(1726) Sel Cas Ch 61",
     "court": "Court of Chancery",
-    "subjects": ["Equity"],
-    "topics": ["Fiduciary duty"],
+    "subjects": [
+      "Equity & Trusts"
+    ],
+    "topics": [
+      "Fiduciary duty",
+      "No profit rule",
+      "Conflict of interest"
+    ],
     "source_label": "Lexionary verified case cache",
     "source_url": "",
     "last_verified": "2026-04-30",
     "verified": true,
-    "text": "Established the strict rule that fiduciaries must not profit from their position without informed consent, even where the principal could not have obtained the benefit."
+    "text": "Keech v Sandford is a foundational fiduciary duty case. A trustee held a lease for the benefit of an infant beneficiary. When the lessor refused to renew the lease for the beneficiary, the trustee obtained the lease for himself. The Court held that the trustee had to hold the renewed lease on trust for the beneficiary. The rule was strict: a fiduciary must not place themselves in a position of conflict or profit from their position without consent, even where the beneficiary could not have obtained the benefit personally. The case is important because it establishes the strict no-conflict and no-profit approach in equity, designed to deter fiduciaries from acting against the interests of those they serve."
   },
   {
     "case_id": "plaintiff-s157-2002-v-commonwealth-2003-hca-2",
     "case_name": "Plaintiff S157/2002 v Commonwealth",
-    "aliases": ["Plaintiff S157"],
+    "aliases": [
+      "Plaintiff S157",
+      "S157"
+    ],
     "neutral_citation": "[2003] HCA 2",
     "report_citation": "(2003) 211 CLR 476",
     "court": "High Court of Australia",
-    "subjects": ["Administrative Law"],
-    "topics": ["Judicial review"],
+    "subjects": [
+      "Administrative Law",
+      "Constitutional Law"
+    ],
+    "topics": [
+      "Judicial review",
+      "Jurisdictional error",
+      "Privative clauses"
+    ],
     "source_label": "Lexionary verified case cache",
     "source_url": "",
     "last_verified": "2026-04-30",
     "verified": true,
-    "text": "Confirmed that jurisdictional error cannot be excluded by privative clauses and that courts retain the power to review unlawful administrative action."
+    "text": "Plaintiff S157/2002 v Commonwealth is a leading Australian administrative law case on jurisdictional error and privative clauses. The High Court held that a privative clause cannot protect a decision affected by jurisdictional error from judicial review. A decision involving jurisdictional error is not a decision made under the Act in the relevant legal sense. The case is important because it confirms the constitutional significance of judicial review and the supervisory role of courts in ensuring that administrative decision-makers remain within lawful authority. It is commonly studied for the relationship between statutory interpretation, migration decisions, jurisdictional error and the limits of legislative attempts to restrict review."
   }
 ]
