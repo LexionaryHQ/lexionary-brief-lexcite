@@ -652,6 +652,7 @@ def health():
         mode = "unknown"
     return {
         "ok": True,
+        "debug_version": "cache-test-30-april",
         "model": OPENAI_MODEL,
         "openai_mode": mode,
         "env_key_present": bool(OPENAI_API_KEY),
