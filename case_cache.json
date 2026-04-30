@@ -244,9 +244,7 @@
     "last_verified": "2026-04-30",
     "verified": true,
     "text": "Plaintiff S157/2002 v Commonwealth is a leading Australian administrative law case on jurisdictional error and privative clauses. The High Court held that a privative clause cannot protect a decision affected by jurisdictional error from judicial review. A decision involving jurisdictional error is not a decision made under the Act in the relevant legal sense. The case is important because it confirms the constitutional significance of judicial review and the supervisory role of courts in ensuring that administrative decision-makers remain within lawful authority. It is commonly studied for the relationship between statutory interpretation, migration decisions, jurisdictional error and the limits of legislative attempts to restrict review."
-  }
-],
-,
+  },
 {
   "case_id": "codelfa-construction-v-state-rail-authority-1982-hca-24",
   "case_name": "Codelfa Construction Pty Ltd v State Rail Authority (NSW)",
@@ -397,3 +395,4 @@
   "verified": true,
   "text": "ASIC v Adler is a leading case on breaches of directors duties including acting in good faith and misuse of position."
 }
+]
