@@ -659,7 +659,6 @@ def health():
         "case_cache_count": len(CASE_CACHE),
     }
 
-
 @app.post("/brief", response_model=BriefResponse)
 def brief(req: BriefRequest, request: Request):
     t0 = time.time()
