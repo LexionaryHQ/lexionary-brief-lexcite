@@ -21,9 +21,10 @@ from aglc_engine import format_citation, format_freeform_line, SourceType
 
 # ---------------- Verified case cache (CBG trust recovery) ----------------
 try:
-    from case_cache import find_cached_case
+    from case_cache import find_cached_case, CASE_CACHE
 except Exception as e:
     find_cached_case = None  # type: ignore
+    CASE_CACHE = []  # type: ignore
     logging.warning("Case cache unavailable at startup: %s", e)
 
 
@@ -655,6 +656,7 @@ def health():
         "openai_mode": mode,
         "env_key_present": bool(OPENAI_API_KEY),
         "has_pdfminer": HAS_PDFMINER,
+        "case_cache_count": len(CASE_CACHE),
     }
 
 
@@ -671,11 +673,20 @@ def brief(req: BriefRequest, request: Request):
     # Cache lookup intentionally runs before any live retrieval. This restores
     # trust by making known high-frequency cases reliable and fast.
     #
-    # We only lookup query-style inputs. If req.text is supplied, that is
-    # treated as pasted judgment text and handled later by the direct text path.
-    if req.query and find_cached_case:
+    # Cache lookup supports both query and text because the WordPress frontend
+    # may send case names/citations as either field. Long pasted judgment text
+    # is not treated as a cache lookup and is handled later as direct text.
+    cache_lookup_input = ""
+    if req.query and req.query.strip():
+        cache_lookup_input = req.query.strip()
+    elif req.text and req.text.strip() and len(req.text.strip()) <= 500:
+        cache_lookup_input = req.text.strip()
+    elif req.url and req.url.strip():
+        cache_lookup_input = req.url.strip()
+
+    if cache_lookup_input and find_cached_case:
         try:
-            cached_case = find_cached_case(req.query)
+            cached_case = find_cached_case(cache_lookup_input)
         except Exception as e:
             cached_case = None
             log.warning("Case cache lookup failed: %s", e)
@@ -683,7 +694,7 @@ def brief(req: BriefRequest, request: Request):
         if cached_case:
             cached_text = (cached_case.get("text") or "").strip()
 
-            if len(cached_text) < 800:
+            if len(cached_text) < 120:
                 log.warning(
                     "Cached case text too short for %s (%d chars).",
                     cached_case.get("case_id") or cached_case.get("case_name"),
@@ -691,7 +702,7 @@ def brief(req: BriefRequest, request: Request):
                 )
                 return BriefResponse(
                     success=False,
-                    brief=CBG_RETRIEVAL_UNAVAILABLE_MESSAGE,
+                    brief="This case is in Lexionary’s verified cache, but the cached extract is too short to generate a reliable brief. Please paste judgment text directly below.",
                     meta={
                         "elapsed_ms": int((time.time() - t0) * 1000),
                         "strategy": "verified_cache_text_too_short",
@@ -714,7 +725,7 @@ def brief(req: BriefRequest, request: Request):
 
             try:
                 brief_text = generate_irac_from_case_text(
-                    case_label=case_label or req.query,
+                    case_label=case_label or cache_lookup_input,
                     case_text=cached_text,
                     pinpoints=req.pinpoints or [],
                     depth=req.depth,
