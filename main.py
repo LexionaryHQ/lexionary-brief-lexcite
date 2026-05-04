@@ -543,23 +543,30 @@ def build_irac_prompt(
     pins = f"Focus on paragraphs: {', '.join(pinpoints)}." if pinpoints else ""
 
     system_rules = (
-        "You produce accurate IRAC case briefs for Australian law students. "
-        "Rely only on the provided case text. Do not fabricate facts, issues, holdings, ratio, or legal principles. "
-        "If the text is incomplete or unclear, say so briefly and proceed conservatively. "
-        "Do not use generic filler unless you immediately explain it with specific reasoning from the text. "
-        "Your job is not just to summarise. Your job is to identify the legal significance of the case."
+        "You are Lexionary's Case Brief Generator for Australian law students. "
+        "You produce accurate, structured IRAC case briefs from provided case text only. "
+        "Never invent facts, holdings, quotations, paragraph numbers, legislation, judges, procedural history, or legal principles. "
+        "If the supplied text is a verified cache extract rather than the full judgment, work only from that extract and say when the brief is based on the supplied extract. "
+        "Your output must help a student understand the legal significance of the case, not merely repeat facts. "
+        "The Application section is the most important section and must explain the court's reasoning using because-style logic. "
+        "Do not draft assignment answers or provide advice to submit. This is study guidance only."
     )
+
+    source_excerpt = case_text[:12000]
 
     user_task = f"""
 CASE: {case_name_or_citation}
 
-GOAL:
-Produce a legally useful IRAC case brief strictly from the provided case text.
-The brief must help an Australian law student understand:
-1. what the real legal issue was,
-2. what rule or principle the court applied,
-3. why the rule mattered on these facts,
-4. what the court ultimately decided.
+TASK:
+Create a high-quality IRAC case brief strictly from the SOURCE TEXT below.
+The brief must be useful for Australian law study, tutorial preparation, revision, and building case notes.
+
+NON-NEGOTIABLE ACCURACY RULES:
+• Use only the supplied SOURCE TEXT.
+• Do not add facts, holdings, quotes, paragraph references, judges, statutes, procedural history, or authorities unless they appear in the text.
+• If a point is not clear from the text, say "The supplied text does not state this clearly" rather than guessing.
+• If the source appears to be a short extract or cache summary, briefly state that the brief is based on the supplied extract.
+• Do not hallucinate pinpoint references.
 
 {AUTHORITY_RULES}
 
@@ -567,34 +574,44 @@ OUTPUT FORMAT:
 
 IRAC Summary
 
-Issue
-• State the real legal controversy, not just the topic.
-• If there are multiple issues, identify the main one first and then any secondary issue briefly.
+1. Snapshot
+• Case: identify the case from the supplied information.
+• Area: identify the subject area if apparent.
+• Why it matters: one sentence explaining why students should know this case.
 
-Rule
-• State the governing legal rule, test, principle, or standard drawn from the case text.
-• If the court discusses competing rules, explain which one controlled.
-• Mention authorities only if they are clear from the text.
-• Be specific about the legal standard.
+2. Issue
+• State the real legal question the court had to resolve.
+• Do not merely name the topic.
+• If multiple issues appear, identify the main issue first and secondary issues briefly.
 
-Application
+3. Rule
+• State the governing rule, test, principle, or standard drawn from the text.
+• Explain the rule in plain legal language.
+• If competing rules or approaches appear, explain which approach controlled.
+• Mention authorities only if they are clearly provided in the text.
+
+4. Application
 • This is the most important section.
 • Explain how the court applied the rule to the facts.
-• Identify the facts, reasoning steps, or legal considerations that were decisive.
-• Use “because” logic: what mattered, why it mattered, and how it led to the outcome.
-• If the court rejected an argument, say what was rejected and why.
-• Avoid vague phrases unless they are followed by specific reasoning from the text.
+• Use because-style reasoning: what mattered, why it mattered, and how it affected the outcome.
+• Identify the decisive facts, policy considerations, statutory features, or reasoning steps if they appear in the text.
+• If the court accepted or rejected an argument, explain the argument and why it succeeded or failed.
+• Avoid generic phrases such as "the court balanced the interests" unless you explain exactly what was balanced and why.
 
-Conclusion
-• State the outcome clearly and shortly.
-• If possible, state what the case stands for in one sentence.
+5. Conclusion
+• State the result clearly.
+• State what the case stands for in one exam-ready sentence.
 
-ADDITIONAL RULES:
-• Do not invent details not supported by the text.
-• Do not pad with generic legal writing.
-• Prefer concrete reasoning over broad summary.
-• If the rule or application is uncertain because the text is incomplete, say what is missing.
-• Write like a strong law student’s case brief, not a chatbot summary.
+6. How to Use This Case in Study
+• Give 2 to 3 short bullet points explaining when a student would cite or rely on this case.
+• Keep this section study-focused, not assignment-writing.
+
+STYLE REQUIREMENTS:
+• Write like a strong law student creating case notes.
+• Be clear, specific and legally disciplined.
+• Prefer short paragraphs and bullet points.
+• Do not use filler.
+• Do not overstate certainty if the supplied text is limited.
 
 CONSTRAINTS:
 • {jur_note}
@@ -602,14 +619,15 @@ CONSTRAINTS:
 • {tone_note}
 • {pins}
 
-SOURCE TEXT (verbatim, truncated):
-\"\"\"{case_text[:12000]}\"\"\"
+SOURCE TEXT:
+<<<
+{source_excerpt}
+>>>
 """
     return {"system": system_rules, "user": user_task}
 
-
 def call_openai(system_msg: str, user_msg: str) -> str:
-    return _openai.chat(system=system_msg, user=user_msg, max_tokens=1200, temperature=0.15)
+    return _openai.chat(system=system_msg, user=user_msg, max_tokens=1500, temperature=0.12)
 
 
 def generate_irac_from_case_text(
