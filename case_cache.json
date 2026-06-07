@@ -1580,25 +1580,30 @@
   "verified": true,
   "text": "Hedley Byrne established liability for negligent misstatement causing economic loss."
 },
-{
-  "case_id": "bunny-industries-ltd-v-fsw-enterprises-pty-ltd-1982-qd-r-712",
-  "case_name": "Bunny Industries Ltd v FSW Enterprises Pty Ltd",
-  "aliases": [
-    "Bunny Industries",
-    "Bunny Industries v FSW Enterprises",
-    "Bunny Industries Ltd v FSW Enterprises",
-    "Bunny Industries Ltd v FSW Enterprises Pty Ltd",
-    "Bunny Industries Pty Ltd v FSW Enterprises Pty Ltd",
-    "Bunny Industries Pty Ltd v FSW Enterprises"
-  "neutral_citation": "",
-  "report_citation": "[1982] Qd R 712",
-  "court": "Supreme Court of Queensland",
-  "subjects": ["Property Law", "Equity"],
-  "topics": ["Vendor and purchaser", "Equitable interests", "Specific performance", "Constructive trust"],
-  "source_label": "Lexionary verified case cache",
-  "source_url": "",
-  "last_verified": "2026-06-08",
-  "verified": true,
-  "text": "Bunny Industries Ltd v FSW Enterprises Pty Ltd concerned the equitable consequences of a contract for the sale of land where the vendor later dealt with the property inconsistently with the first purchaser's interest. The case is commonly used to illustrate the principle that, once a specifically enforceable contract for sale of land exists, the vendor holds the land on trust for the purchaser in equity. The vendor must not act inconsistently with the purchaser's equitable interest, and may be accountable for the proceeds of a later sale. The case is useful for discussing equitable conversion, vendor and purchaser obligations, specific performance, constructive trusts and the treatment of competing interests in land."
-},  
+ {
+    "case_id": "bunny-industries-ltd-v-fsw-enterprises-pty-ltd-1982-qd-r-712",
+    "case_name": "Bunny Industries Ltd v FSW Enterprises Pty Ltd",
+    "aliases": [
+      "Bunny Industries",
+      "bunny industries",
+      "Bunny Industries v FSW Enterprises",
+      "bunny industries v fsw enterprises",
+      "Bunny Industries Ltd v FSW Enterprises",
+      "Bunny Industries Ltd v FSW Enterprises Pty Ltd",
+      "Bunny Industries Pty Ltd v FSW Enterprises Pty Ltd",
+      "Bunny Industries Pty Ltd v FSW Enterprises",
+      "Bunny Industries Ltd v FSW Enterprises Pty Ltd [1982] Qd R 712",
+      "Bunny Industries v FSW Enterprises [1982] Qd R 712"
+    ],
+    "neutral_citation": "",
+    "report_citation": "[1982] Qd R 712",
+    "court": "Supreme Court of Queensland",
+    "subjects": ["Property Law", "Equity"],
+    "topics": ["Vendor and purchaser", "Equitable interests", "Specific performance", "Constructive trust"],
+    "source_label": "Lexionary verified case cache",
+    "source_url": "",
+    "last_verified": "2026-06-08",
+    "verified": true,
+    "text": "Bunny Industries Ltd v FSW Enterprises Pty Ltd concerned the equitable consequences of a contract for the sale of land where the vendor later dealt with the property inconsistently with the first purchaser's interest. The case is commonly used to illustrate the principle that, once a specifically enforceable contract for sale of land exists, the vendor holds the land on trust for the purchaser in equity. The vendor must not act inconsistently with the purchaser's equitable interest, and may be accountable for the proceeds of a later sale. The case is useful for discussing equitable conversion, vendor and purchaser obligations, specific performance, constructive trusts and the treatment of competing interests in land."
+  }
 ]
