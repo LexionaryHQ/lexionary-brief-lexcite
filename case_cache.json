@@ -1605,5 +1605,44 @@
     "last_verified": "2026-06-08",
     "verified": true,
     "text": "Bunny Industries Ltd v FSW Enterprises Pty Ltd concerned the equitable consequences of a contract for the sale of land where the vendor later dealt with the property inconsistently with the first purchaser's interest. The case is commonly used to illustrate the principle that, once a specifically enforceable contract for sale of land exists, the vendor holds the land on trust for the purchaser in equity. The vendor must not act inconsistently with the purchaser's equitable interest, and may be accountable for the proceeds of a later sale. The case is useful for discussing equitable conversion, vendor and purchaser obligations, specific performance, constructive trusts and the treatment of competing interests in land."
-  }
+  },
+  {
+  "case_id": "tanwar-enterprises-pty-ltd-v-cauchi-2003-hca-57",
+  "case_name": "Tanwar Enterprises Pty Ltd v Cauchi",
+  "aliases": [
+    "Tanwar",
+    "Tanwar Enterprises",
+    "Tanwar Enterprises Pty Ltd v Cauchi",
+    "Tanwar v Cauchi"
+  ],
+  "neutral_citation": "[2003] HCA 57",
+  "report_citation": "(2003) 217 CLR 315",
+  "court": "High Court of Australia",
+  "subjects": ["Property Law", "Equity"],
+  "topics": ["Specific performance", "Time stipulations", "Vendor and purchaser", "Relief against forfeiture"],
+  "source_label": "Lexionary verified case cache",
+  "source_url": "",
+  "last_verified": "2026-06-08",
+  "verified": true,
+  "text": "Tanwar Enterprises Pty Ltd v Cauchi concerned a purchaser's failure to complete a contract for the sale of land by the contractual completion date. The High Court reaffirmed that equity does not generally relieve against the consequences of failing to comply with an essential time stipulation in a commercial contract. Relief will only be available in exceptional circumstances involving fraud, accident, mistake or other equitable considerations. The case is significant for illustrating the limits of equitable intervention in vendor and purchaser transactions and the importance of contractual certainty where time is of the essence."
+},
+  {
+  "case_id": "lysaght-v-edwards-1876-2-ch-d-499",
+  "case_name": "Lysaght v Edwards",
+  "aliases": [
+    "Lysaght",
+    "Lysaght v Edwards",
+    "Lysaght and Edwards"
+  ],
+  "neutral_citation": "",
+  "report_citation": "(1876) 2 Ch D 499",
+  "court": "Court of Appeal (England)",
+  "subjects": ["Property Law", "Equity"],
+  "topics": ["Equitable conversion", "Vendor and purchaser", "Trust relationship", "Specific performance"],
+  "source_label": "Lexionary verified case cache",
+  "source_url": "",
+  "last_verified": "2026-06-08",
+  "verified": true,
+  "text": "Lysaght v Edwards is a foundational authority on the doctrine of equitable conversion. The court held that once a specifically enforceable contract for the sale of land is formed, the purchaser becomes the equitable owner of the land and the vendor holds the legal title on trust for the purchaser. The purchaser is treated in equity as the true owner, while the vendor's interest is converted into a right to receive the purchase money. The case remains a leading authority on the equitable relationship between vendor and purchaser and underpins modern principles concerning trusts arising from contracts for the sale of land."
+}
 ]
