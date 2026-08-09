@@ -1,6 +1,6 @@
 # aglc_engine.py
 # Lexcite AGLC4 formatting engine (deterministic, HTML italics support)
-# Version: 2.1.0 (whitespace + punctuation normalisation, safer joins)
+# Version: 2.2.0 (combined case pinpoints + duplicate case-citation guard)
 #
 # Key upgrade: a single, central cleaner that removes accidental extra spaces
 # everywhere (text + html), including edge cases like:
@@ -199,7 +199,12 @@ class CaseInput(BaseModel):
     neutral_citation_first: bool = True
     unreported: bool = False  # if True, neutral is required
 
-    # Pinpoint
+    # Pinpoints
+    # New fields support AGLC4 reported-case pinpoints such as: 402 [29].
+    pinpoint_page: Optional[str] = None
+    pinpoint_paragraph: Optional[str] = None
+
+    # Legacy fields retained temporarily for backwards compatibility with older frontends.
     pinpoint_type: Optional[str] = None  # "page" | "paragraph"
     pinpoint: Optional[str] = None
 
@@ -224,12 +229,35 @@ class CaseInput(BaseModel):
                 "Provide either a neutral citation (court + decision number) or a reported citation (volume + reporter + first page)."
             )
 
+        # Backwards compatibility: map the old single-pinpoint payload into the new fields.
         if self.pinpoint_type:
             pt = self.pinpoint_type.strip().lower()
             if pt not in ("page", "paragraph"):
                 raise ValueError("Pinpoint type must be 'page' or 'paragraph'.")
             if not self.pinpoint:
                 raise ValueError("Pinpoint value is required when a pinpoint type is selected.")
+            if pt == "page" and not self.pinpoint_page:
+                self.pinpoint_page = self.pinpoint
+            if pt == "paragraph" and not self.pinpoint_paragraph:
+                self.pinpoint_paragraph = self.pinpoint
+
+        if self.pinpoint_page:
+            self.pinpoint_page = normalise_pinpoint_value(self.pinpoint_page)
+        if self.pinpoint_paragraph:
+            self.pinpoint_paragraph = normalise_pinpoint_value(self.pinpoint_paragraph)
+
+        # For a reported case, a paragraph pinpoint should sit alongside the report page.
+        # Neutral/unreported cases use paragraph pinpoints without a page pinpoint.
+        if has_reported and self.pinpoint_paragraph and not self.pinpoint_page:
+            raise ValueError(
+                "For a reported case with a paragraph pinpoint, also provide the pinpoint page (for example, 402 [29])."
+            )
+
+        # Users sometimes paste the full reported citation into Case name as well as
+        # completing the structured reporter fields. Strip that trailing citation so
+        # the output cannot duplicate the citation.
+        if has_reported:
+            self.case_name = strip_trailing_reported_citation(self.case_name)
 
         return self
 
@@ -421,15 +449,15 @@ def format_case(m: CaseInput) -> Tuple[str, str]:
 
     pin_text = ""
     pin_html = ""
-    if m.pinpoint_type and m.pinpoint:
-        pt = m.pinpoint_type.strip().lower()
-        val = normalise_pinpoint_value(m.pinpoint)
-        if pt == "paragraph":
-            pin_text = f"[{val}]"
-            pin_html = f"[{escape_text(val)}]"
-        else:
-            pin_text = f"{val}"
-            pin_html = escape_text(val)
+    if m.pinpoint_page and m.pinpoint_paragraph:
+        pin_text = f"{m.pinpoint_page} [{m.pinpoint_paragraph}]"
+        pin_html = f"{escape_text(m.pinpoint_page)} [{escape_text(m.pinpoint_paragraph)}]"
+    elif m.pinpoint_page:
+        pin_text = m.pinpoint_page
+        pin_html = escape_text(m.pinpoint_page)
+    elif m.pinpoint_paragraph:
+        pin_text = f"[{m.pinpoint_paragraph}]"
+        pin_html = f"[{escape_text(m.pinpoint_paragraph)}]"
 
     neutral_text = ""
     neutral_html = ""
@@ -958,6 +986,25 @@ def normalise_titlecase(text: str) -> str:
         return s
     if looks_mostly_lower(s):
         return s.title()
+    return s
+
+
+def strip_trailing_reported_citation(case_name: str) -> str:
+    """Remove a reported citation accidentally pasted into the case-name field.
+
+    Example: ``Mabo v Queensland (No 2) (1992) 175 CLR 1`` becomes
+    ``Mabo v Queensland (No 2)`` when the structured report fields are also used.
+    """
+    s = " ".join((case_name or "").split()).strip()
+    if not s:
+        return s
+
+    # Covers common Australian reported forms using either round or square-bracket years.
+    s = re.sub(
+        r"\s+[\(\[]\d{4}[\)\]]\s+\d+\s+[A-Za-z][A-Za-z0-9.]*\s+\d+\s*$",
+        "",
+        s,
+    ).strip()
     return s
 
 
